@@ -1,0 +1,1 @@
+"""Embedded platform bootstrap tests."""

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": "embedded-dual-machine-v1",
+      "type": "spec",
+      "name": "Embedded Agent Engineering",
+      "description": "Host-neutral embedded engineering rules with capability-routed machine runtimes.",
+      "path": "marketplace/specs/embedded-dual-machine-v1",
+      "tags": ["embedded", "mcu", "mpu", "soc", "agent-platform", "windows-runtime"]
+    }
+  ]
+}

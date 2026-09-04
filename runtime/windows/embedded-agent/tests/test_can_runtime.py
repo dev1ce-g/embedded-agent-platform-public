@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import importlib.util
+import io
+import json
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+RUNTIME = Path(__file__).resolve().parents[1]
+BIN = RUNTIME.parent / "bin"
+sys.path.insert(0, str(RUNTIME))
+sys.path.insert(0, str(BIN))
+
+import can_middleware
+import embedded_agent
+import embedded_runtime_can
+import zcanpro_dll
+
+
+class CanMiddlewareTests(unittest.TestCase):
+    def call(self, *arguments: str) -> tuple[int, dict]:
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(output):
+            exit_code = embedded_agent.main(["--root", directory, *arguments, "--json"])
+        return exit_code, json.loads(output.getvalue())
+
+    def test_driver_list_exposes_multiple_real_adapters(self) -> None:
+        exit_code, value = self.call("can", "driver-list")
+        names = {item["name"] for item in value["drivers"]}
+        adapters = {item["adapter"] for item in value["drivers"]}
+        self.assertEqual(exit_code, 0)
+        self.assertTrue({"controlcan", "zcanpro"}.issubset(names))
+        self.assertTrue({"controlcan_dll", "zcanpro_dll"}.issubset(adapters))
+        self.assertTrue(all("python" in item and "python_arch" in item for item in value["drivers"]))
+
+    def test_pe_architecture_detects_x86_and_x64(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for machine, expected in ((0x014C, "x86"), (0x8664, "x64")):
+                path = root / f"{expected}.dll"
+                content = bytearray(256)
+                content[0x3C:0x40] = (128).to_bytes(4, "little")
+                content[132:134] = machine.to_bytes(2, "little")
+                path.write_bytes(content)
+                self.assertEqual(can_middleware.pe_architecture(path), expected)
+
+    def test_arch_specific_packages_precede_legacy_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            architecture_site = root / "site-packages-x64"
+            legacy_site = root / "site-packages"
+            architecture_site.mkdir()
+            legacy_site.mkdir()
+            (architecture_site / "priority_probe.py").write_text("VALUE = 'architecture'\n", encoding="utf-8")
+            (legacy_site / "priority_probe.py").write_text("VALUE = 'legacy'\n", encoding="utf-8")
+            environment = os.environ.copy()
+            environment["EMBEDDED_CAN_RUNTIME"] = str(root)
+            code = (
+                f"import sys; sys.path.insert(0, {str(BIN)!r}); "
+                "import can_middleware, priority_probe; print(priority_probe.VALUE)"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", code],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                env=environment,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "architecture")
+
+    def test_runtime_modules_requires_successful_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site-packages-x64"
+            site.mkdir()
+            (site / "broken_can.py").write_text("raise AttributeError('broken dependency')\n", encoding="utf-8")
+            with mock.patch.object(can_middleware, "CAN_RUNTIME_ROOT", root):
+                modules = can_middleware.runtime_modules(Path(sys.executable), "x64", ("broken_can",))
+        self.assertFalse(modules["broken_can"])
+
+    def test_x86_runtime_pins_python38_typing_extensions(self) -> None:
+        requirements = RUNTIME.parent / "can-runtime" / "requirements-x86.txt"
+        self.assertIn("typing_extensions==4.13.2", requirements.read_text(encoding="utf-8").splitlines())
+
+    def test_zcanpro_uses_direct_vendor_dll_adapter(self) -> None:
+        spec = can_middleware.DRIVERS["zcanpro"]
+
+        self.assertEqual(spec.adapter, "zcanpro_dll")
+        self.assertEqual(spec.required_modules, ("can",))
+        self.assertIn(sys.executable, spec.runtime_candidates)
+
+    def test_zcanpro_direct_adapter_opens_starts_transmits_and_closes(self) -> None:
+        events: list[tuple] = []
+
+        class FakeFunction:
+            def __init__(self, callback):
+                self.callback = callback
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        def transmit(_handle, pointer, count):
+            value = ctypes.cast(pointer, ctypes.POINTER(zcanpro_dll.ZCanTransmitData)).contents
+            events.append(("transmit", value.frame.can_id, bytes(value.frame.data[: value.frame.can_dlc]), count))
+            return 1
+
+        fake_dll = types.SimpleNamespace(
+            ZCAN_OpenDevice=FakeFunction(lambda device_type, index, reserved: events.append(("open", device_type, index, reserved)) or 0x100),
+            ZCAN_CloseDevice=FakeFunction(lambda handle: events.append(("close", handle)) or 1),
+            ZCAN_InitCAN=FakeFunction(lambda handle, channel, config: events.append(("init", handle, channel)) or 0x200),
+            ZCAN_StartCAN=FakeFunction(lambda handle: events.append(("start", handle)) or 1),
+            ZCAN_ResetCAN=FakeFunction(lambda handle: events.append(("reset", handle)) or 1),
+            ZCAN_Transmit=FakeFunction(transmit),
+            ZCAN_Receive=FakeFunction(lambda *_args: 0),
+        )
+        with mock.patch.object(zcanpro_dll, "load_library", return_value=(fake_dll, [])):
+            device = zcanpro_dll.ZCanProDevice("zlgcan.dll", "ZCAN_USBCAN2", 0, 0)
+            device.open(500000)
+            device.send(0x705, b"\x10\x01")
+            device.close()
+
+        self.assertIn(("open", 4, 0, 0), events)
+        self.assertIn(("init", 0x100, 0), events)
+        self.assertIn(("start", 0x200), events)
+        self.assertIn(("transmit", 0x705, b"\x10\x01", 1), events)
+        self.assertIn(("reset", 0x200), events)
+        self.assertIn(("close", 0x100), events)
+
+    def test_controlcan_open_bus_uses_vendor_dll_adapter(self) -> None:
+        events: list[tuple] = []
+
+        class FakeBusABC:
+            def __init__(self, channel: int, **_kwargs) -> None:
+                self.channel = channel
+
+            def shutdown(self) -> None:
+                events.append(("base-shutdown",))
+
+        class FakeMessage:
+            def __init__(self, arbitration_id: int, data: bytes, is_extended_id: bool = False, **_kwargs) -> None:
+                self.arbitration_id = arbitration_id
+                self.data = data
+                self.is_extended_id = is_extended_id
+
+        class FakeControlCan:
+            def __init__(self, dll_path: str, dev_type: int, dev_index: int, can_index: int) -> None:
+                events.append(("init", dll_path, dev_type, dev_index, can_index))
+
+            def open(self, bitrate: int) -> None:
+                events.append(("open", bitrate))
+
+            def send(self, can_id: int, data: bytes, extended: bool = False) -> None:
+                events.append(("send", can_id, data, extended))
+
+            def recv_many(self, timeout_ms: int) -> list:
+                events.append(("recv", timeout_ms))
+                return []
+
+            def close(self) -> None:
+                events.append(("close",))
+
+        def reject_canalystii(**_kwargs):
+            raise AssertionError("python-can canalystii backend must not be used for ControlCAN.dll")
+
+        fake_can = types.SimpleNamespace(BusABC=FakeBusABC, Message=FakeMessage, Bus=reject_canalystii)
+        fake_controlcan = types.SimpleNamespace(ControlCan=FakeControlCan, parse_dev_type=lambda value: int(value, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            dll = Path(directory) / "ControlCAN.dll"
+            dll.write_bytes(b"not-a-real-pe")
+            inventory = [{"dll": str(dll)}]
+            with (
+                mock.patch.dict(sys.modules, {"can": fake_can, "pc_uds_ecu_sim": fake_controlcan}),
+                mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
+                mock.patch.object(can_middleware, "pe_architecture", return_value="unknown"),
+            ):
+                _, bus = can_middleware.open_bus("controlcan", channel=0, bitrate=500000, device_index=0)
+                bus.send(FakeMessage(0x705, b"\x02\x10\x01"))
+                bus.shutdown()
+
+        self.assertIn(("open", 500000), events)
+        self.assertIn(("send", 0x705, b"\x02\x10\x01", False), events)
+        self.assertIn(("close",), events)
+
+    def test_device_probe_reports_only_opened_selectors(self) -> None:
+        backend = {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": json.dumps(
+                {
+                    "results": [
+                        {"type": 3, "index": 0, "open": 0},
+                        {"type": 20, "index": 1, "open": 1},
+                    ]
+                }
+            ),
+        }
+        inventory = [{"dll": r"C:\Vendor\ControlCAN.dll"}]
+        with (
+            mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
+            mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
+        ):
+            exit_code, value = self.call("can", "device-probe", "--driver", "controlcan")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(value["matches"], [{"device_model": 20, "device_index": 1}])
+
+    def test_probe_json_parser_ignores_vendor_warning_after_json(self) -> None:
+        value = embedded_runtime_can._parse_backend_json('{"ok":true,"results":[]}\n[WRN] vendor log failed\n')
+
+        self.assertTrue(value["ok"])
+
+    def test_can_failure_summary_prefers_timeout_over_request_echo(self) -> None:
+        summary = embedded_runtime_can._failure_text("", "> 10 01\n  TIMEOUT\n")
+
+        self.assertEqual(summary, "TIMEOUT")
+
+    def test_zcanpro_device_probe_rejects_network_style_false_positive(self) -> None:
+        backend = {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": json.dumps(
+                {
+                    "results": [
+                        {"type": 17, "index": 0, "open": 1, "device_info": 1, "physical": False},
+                        {"type": 4, "index": 0, "open": 1, "device_info": 1, "physical": True},
+                    ]
+                }
+            ),
+        }
+        inventory = [{"dll": r"C:\Vendor\ZCANPro\zlgcan.dll"}]
+        with (
+            mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
+            mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
+        ):
+            exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(value["matches"], [{"device_model": 4, "device_index": 0}])
+
+    def test_zcanpro_device_probe_closes_handle_when_device_info_fails(self) -> None:
+        spec = importlib.util.spec_from_file_location("probe_zcanpro_close_test", BIN / "probe-zcanpro.py")
+        assert spec and spec.loader
+        probe_zcanpro = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe_zcanpro)
+        events: list[str] = []
+
+        def fail_device_info(*_args):
+            events.append("device-info")
+            raise OSError("device info failed")
+
+        fake_dll = types.SimpleNamespace(
+            ZCAN_OpenDevice=lambda *_args: events.append("open") or 0x100,
+            ZCAN_GetDeviceInf=fail_device_info,
+            ZCAN_CloseDevice=lambda *_args: events.append("close") or 1,
+        )
+        with (
+            mock.patch.object(probe_zcanpro, "load_library", return_value=(fake_dll, [])),
+            mock.patch.object(probe_zcanpro, "bind_library"),
+            mock.patch.object(probe_zcanpro, "pe_machine", return_value="unknown"),
+        ):
+            results = probe_zcanpro.probe(Path("zlgcan.dll"), [4], [0])
+
+        self.assertEqual(events, ["open", "device-info", "close"])
+        self.assertEqual(results[0]["close"], 1)
+        self.assertIn("device info failed", results[0]["error"])
+
+    def test_zcanpro_device_probe_propagates_architecture_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dll = Path(directory) / "zlgcan.dll"
+            content = bytearray(256)
+            content[0x3C:0x40] = (128).to_bytes(4, "little")
+            opposite_machine = 0x014C if struct.calcsize("P") == 8 else 0x8664
+            content[132:134] = opposite_machine.to_bytes(2, "little")
+            dll.write_bytes(content)
+
+            exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro", "--dll", str(dll))
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(value["ok"])
+        self.assertIn("run this adapter", value["first_failure"])
+        self.assertNotIn('"operation":"probe-zcanpro"', value["first_failure"])
+
+    def test_self_test_does_not_require_can_driver(self) -> None:
+        exit_code, value = self.call("can", "self-test")
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(value["ok"])
+        self.assertIn("self-test ok", value["backend"]["stdout"])
+
+    def test_send_gate_closes_before_driver_access(self) -> None:
+        exit_code, value = self.call("can", "send", "--driver", "controlcan", "--frame", "0x123#01")
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(value["requires_human_confirm"])
+
+    def test_monitor_must_be_bounded(self) -> None:
+        exit_code, value = self.call("can", "monitor", "--driver", "controlcan")
+        self.assertEqual(exit_code, 2)
+        self.assertIn("bounded", value["first_failure"])
+
+    def test_uds_ecu_must_be_bounded_before_gate(self) -> None:
+        exit_code, value = self.call("can", "uds-ecu", "--driver", "controlcan")
+        self.assertEqual(exit_code, 2)
+        self.assertIn("bounded", value["first_failure"])
+
+
+if __name__ == "__main__":
+    unittest.main()

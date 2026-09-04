@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+windows_prefix_wsl="${WSL_EMBEDDED_AGENT_PREFIX:-}"
+windows_script_wsl="${WSL_EMBEDDED_AGENT_SCRIPT:-${windows_prefix_wsl:+${windows_prefix_wsl}/bin/embedded-agent.py}}"
+windows_root_wsl="${WSL_EMBEDDED_AGENT_ROOT:-${windows_prefix_wsl:+${windows_prefix_wsl}/state}}"
+windows_agentctl_wsl="${WSL_EMBEDDED_AGENTCTL:-${windows_prefix_wsl:+${windows_prefix_wsl}/bin/agentctl.py}}"
+windows_cmd="${WSL_WINDOWS_CMD:-/mnt/c/Windows/System32/cmd.exe}"
+
+fail() {
+  local message="$1"
+  if [[ " $* " == *" --json "* ]]; then
+    python3 - "$message" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "ok": False,
+    "operation": "agent-transport",
+    "exit_code": 127,
+    "error_code": "WSL_WINDOWS_INTEROP_UNAVAILABLE",
+    "first_failure": sys.argv[1],
+}, ensure_ascii=False, separators=(",", ":")))
+PY
+  else
+    printf 'embedded-agent: %s\n' "$message" >&2
+  fi
+  exit 127
+}
+
+[[ -n "$windows_prefix_wsl" || ( -n "$windows_script_wsl" && -n "$windows_root_wsl" && -n "$windows_agentctl_wsl" ) ]] || fail "Set WSL_EMBEDDED_AGENT_PREFIX to the Windows install root" "$@"
+[[ -f "$windows_script_wsl" ]] || fail "Windows embedded-agent entry not found: $windows_script_wsl" "$@"
+[[ -x "$windows_cmd" ]] || fail "Windows cmd.exe not found: $windows_cmd" "$@"
+
+if [[ -n "${WSL_WINDOWS_PY:-}" ]]; then
+  windows_py="$WSL_WINDOWS_PY"
+else
+  windows_py_win="$(cd /mnt/c && "$windows_cmd" /d /s /c "where py" 2>/dev/null | tr -d '\r' | sed -n '1p')"
+  [[ -n "$windows_py_win" ]] || fail "Windows Python launcher was not found" "$@"
+  windows_py="$(wslpath -u "$windows_py_win")"
+fi
+[[ -x "$windows_py" ]] || fail "Windows Python launcher is not executable: $windows_py" "$@"
+
+windows_script="$(wslpath -w "$windows_script_wsl")"
+windows_root="$(wslpath -w "$windows_root_wsl")"
+windows_agentctl="$(wslpath -w "$windows_agentctl_wsl")"
+payload="$(python3 - "$windows_script" "$windows_root" "$windows_agentctl" "$@" <<'PY'
+import base64
+import json
+import sys
+
+value = {
+    "script": sys.argv[1],
+    "root": sys.argv[2],
+    "agentctl": sys.argv[3],
+    "args": sys.argv[4:],
+}
+encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+print(base64.b64encode(encoded).decode("ascii"))
+PY
+)"
+
+exec "$windows_py" -3 "$windows_script" --payload-b64 "$payload"

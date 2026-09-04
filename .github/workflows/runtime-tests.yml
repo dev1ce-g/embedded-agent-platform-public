@@ -1,0 +1,52 @@
+name: Runtime tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.9"
+
+      - name: Compile Python sources
+        run: python -m compileall -q bootstrap runtime/windows
+
+      - name: Test portable installation and public-source checks
+        run: python -m unittest bootstrap.tests.test_windows_runtime_installer bootstrap.tests.test_public_readiness -v
+
+      - name: Run Windows Runtime tests
+        run: python -m unittest discover -s runtime/windows/embedded-agent/tests -v
+
+      - name: Run Mac wrapper tests
+        if: runner.os == 'Linux'
+        run: python -m unittest bootstrap.tests.test_mac_embedded_agent_wrapper -v
+
+      - name: Run full bootstrap tests
+        if: runner.os == 'Linux'
+        run: python -m unittest discover -s bootstrap/tests -v
+
+      - name: Check Mac wrapper syntax
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash -n runtime/mac/bin/embedded-agent
