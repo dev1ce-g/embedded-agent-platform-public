@@ -2,7 +2,7 @@ name: Platform software acceptance
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
 
 permissions:
