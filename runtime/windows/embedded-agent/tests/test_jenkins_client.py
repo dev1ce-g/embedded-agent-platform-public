@@ -31,7 +31,7 @@ class JenkinsCredentialTests(unittest.TestCase):
     def write_config(self, content: str) -> Path:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        path = Path(directory.name) / "sdk.cfg"
+        path = Path(directory.name).resolve() / "sdk.cfg"
         path.write_text(content, encoding="utf-8")
         return path
 
@@ -64,7 +64,7 @@ class JenkinsConnectionRegistryTests(unittest.TestCase):
             "connections": {"firmware-ci": connection},
         }
         document.update(root_overrides)
-        path = Path(directory.name) / "jenkins-connections.json"
+        path = Path(directory.name).resolve() / "jenkins-connections.json"
         path.write_text(json.dumps(document), encoding="utf-8")
         return path
 
@@ -248,7 +248,7 @@ class JenkinsArtifactTests(unittest.TestCase):
         client = self.client()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        target = Path(directory.name) / "nested" / "file.zip"
+        target = Path(directory.name).resolve() / "nested" / "file.zip"
         with mock.patch.object(client.opener, "open", return_value=self.response(payload)) as opened:
             value = client.download_artifact("http://jenkins/job/test/artifact/file.zip", target, expected, 1024)
         self.assertEqual(target.read_bytes(), payload)
@@ -261,13 +261,13 @@ class JenkinsArtifactTests(unittest.TestCase):
         client = self.client()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        target = Path(directory.name) / "file.zip"
+        target = Path(directory.name).resolve() / "file.zip"
         with mock.patch.object(client.opener, "open", return_value=self.response(b"wrong")):
             with self.assertRaises(JenkinsError) as raised:
                 client.download_artifact("http://jenkins/job/test/artifact/file.zip", target, "0" * 64, 1024)
         self.assertEqual(raised.exception.code, "ARTIFACT_HASH_MISMATCH")
         self.assertFalse(target.exists())
-        self.assertEqual(list(Path(directory.name).glob("*.part")), [])
+        self.assertEqual(list(Path(directory.name).resolve().glob("*.part")), [])
 
     def test_rejects_cross_origin_before_sending_credentials(self):
         client = self.client()
@@ -281,7 +281,7 @@ class JenkinsArtifactTests(unittest.TestCase):
         client = self.client()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        target = Path(directory.name) / "file.zip"
+        target = Path(directory.name).resolve() / "file.zip"
         response = self.response(b"artifact", "http://attacker.example/file.zip")
         with mock.patch.object(client.opener, "open", return_value=response):
             with self.assertRaises(JenkinsError) as raised:
@@ -300,7 +300,7 @@ class JenkinsArtifactTests(unittest.TestCase):
         client = self.client()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        target = Path(directory.name) / "file.zip"
+        target = Path(directory.name).resolve() / "file.zip"
         response = self.response(payload, "http://jenkins:80/artifact.zip")
         with mock.patch.object(client.opener, "open", return_value=response):
             client.download_artifact("http://jenkins:80/artifact.zip", target, expected, 1024)
@@ -334,7 +334,7 @@ class ArtifactCommandTests(unittest.TestCase):
     def test_confirmation_gate_precedes_credentials_and_network(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        base = Path(directory.name)
+        base = Path(directory.name).resolve()
         args = self.args(base / "agent", base / "workspace")
         output = io.StringIO()
         connection = JenkinsConnection("firmware-ci", "http://jenkins", Path("/machine/credentials.json"))
@@ -352,7 +352,7 @@ class ArtifactCommandTests(unittest.TestCase):
     def test_destination_must_remain_inside_registered_workspace(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        base = Path(directory.name)
+        base = Path(directory.name).resolve()
         workspace = base / "workspace"
         workspace.mkdir()
         args = self.args(base / "agent", workspace, to="../escape.zip", confirm=True)
@@ -371,7 +371,7 @@ class ArtifactCommandTests(unittest.TestCase):
     def test_artifact_origin_must_match_selected_connection_before_credentials(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        base = Path(directory.name)
+        base = Path(directory.name).resolve()
         args = self.args(base / "agent", base / "workspace", url="http://attacker.example/artifact.zip", confirm=True)
         connection = JenkinsConnection("firmware-ci", "http://jenkins", Path("/machine/credentials.json"))
         output = io.StringIO()

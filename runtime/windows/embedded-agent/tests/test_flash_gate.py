@@ -19,7 +19,7 @@ from embedded_runtime_operations import command_flash  # noqa: E402
 class FlashGateTests(unittest.TestCase):
     def test_flash_reaches_confirmation_gate_without_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             project_dir = root / "projects" / "sample"
             workspace = root / "workspace"
             project_dir.mkdir(parents=True)
@@ -52,7 +52,7 @@ class FlashGateTests(unittest.TestCase):
 
     def test_flash_requires_confirmation_for_legacy_automatic_selection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             project_dir = root / "projects" / "sample"
             workspace = root / "workspace"
             project_dir.mkdir(parents=True)

@@ -65,7 +65,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_builds_bounded_usb_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, package, aboot_root = self.make_fixture(root)
             value = prepare_aboot_flash(
                 workspace=workspace,
@@ -84,7 +84,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_rejects_package_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, _, aboot_root = self.make_fixture(root)
             package = root / "external.zip"
             with zipfile.ZipFile(package, "w") as archive:
@@ -106,7 +106,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_requires_scoped_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, package, aboot_root = self.make_fixture(root)
             value = prepare_aboot_flash(
                 workspace=workspace,
@@ -157,7 +157,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_resolves_relative_package_from_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, package, _ = self.make_fixture(root)
             value = stage_aboot_package(workspace, package.relative_to(workspace), root / "firmware")
         self.assertTrue(value["ok"])
@@ -166,7 +166,7 @@ class AbootPreflightTests(unittest.TestCase):
     def test_workspace_executable_override_is_rejected_before_subprocess(self) -> None:
         parser = build_parser()
         with tempfile.TemporaryDirectory() as directory:
-            malicious_root = Path(directory) / "workspace" / "tools" / "aboot"
+            malicious_root = Path(directory).resolve() / "workspace" / "tools" / "aboot"
             malicious_root.mkdir(parents=True)
             (malicious_root / "adownload.exe").write_bytes(b"malicious executable")
             arguments = [
@@ -192,7 +192,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_extracts_unique_mpu_release_from_combined_package(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             combined = workspace / "combined.zip"
             workspace.mkdir()
@@ -214,7 +214,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_combined_package_rejects_symlinked_embedded_builds_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             workspace.mkdir()
             combined = workspace / "combined.zip"
@@ -240,7 +240,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_extracts_mpu_release_from_combined_reference_package(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             combined = firmware_root / "combined.zip"
@@ -262,7 +262,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_rejects_multiple_mpu_release_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             combined = workspace / "combined.zip"
             workspace.mkdir()
@@ -280,7 +280,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_stages_reference_package_into_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             source = firmware_root / "release.zip"
@@ -297,7 +297,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_reference_package_rejects_symlinked_staging_ancestor_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             source = firmware_root / "release.zip"
@@ -325,7 +325,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_reference_package_rejects_simulated_windows_junction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             source = firmware_root / "release.zip"
@@ -355,7 +355,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_reference_package_does_not_follow_precreated_temporary_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             source = firmware_root / "release.zip"
@@ -384,7 +384,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_rejects_external_package_outside_firmware_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             firmware_root = root / "firmware"
             source = root / "other" / "release.zip"
@@ -399,7 +399,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_machine_connection_binds_tool_and_firmware_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             _workspace, _package, aboot_root = self.make_fixture(root)
             firmware_root = root / "approved-firmware"
             registry = self.write_registry(root, aboot_root, firmware_root=firmware_root)
@@ -411,7 +411,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_mandatory_tool_hash_rejects_workspace_executable_before_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, package, _aboot_root = self.make_fixture(root)
             malicious_root = workspace / "tools" / "aboot"
             malicious_root.mkdir(parents=True)
@@ -444,7 +444,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_symlinked_tool_is_rejected_by_machine_registry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             real_root = root / "real-aboot"
             real_root.mkdir()
             real_tool = real_root / "adownload.exe"
@@ -463,7 +463,7 @@ class AbootPreflightTests(unittest.TestCase):
 
     def test_missing_machine_registry_fails_before_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace, package, _aboot_root = self.make_fixture(root)
             with (
                 mock.patch.object(embedded_runtime_aboot, "ABOOT_CONNECTIONS_PATH", root / "missing.json"),

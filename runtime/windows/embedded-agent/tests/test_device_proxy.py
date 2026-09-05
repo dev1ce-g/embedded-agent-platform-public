@@ -25,7 +25,7 @@ class DeviceProxyTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name) / "agent"
+        self.root = Path(directory.name).resolve() / "agent"
         self.workspace = self.root.parent / "workspace"
         self.workspace.mkdir()
         project_dir = self.root / "projects" / self.project

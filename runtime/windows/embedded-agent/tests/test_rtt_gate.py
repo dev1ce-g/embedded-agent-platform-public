@@ -21,7 +21,7 @@ class RttGateTests(unittest.TestCase):
     def invoke(self, *, reset: bool, require_confirm: bool = False, confirm: bool = False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        root = Path(directory.name)
+        root = Path(directory.name).resolve()
         workspace = root / "workspace"
         workspace.mkdir()
         project_dir = root / "projects" / "sample"

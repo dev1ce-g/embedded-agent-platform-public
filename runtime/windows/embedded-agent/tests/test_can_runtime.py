@@ -54,7 +54,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_pe_architecture_detects_x86_and_x64(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for machine, expected in ((0x014C, "x86"), (0x8664, "x64")):
                 path = root / f"{expected}.dll"
                 content = bytearray(256)
@@ -65,7 +65,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_arch_specific_packages_precede_legacy_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             architecture = can_middleware.process_architecture()
             architecture_site = root / f"site-packages-{architecture}"
             legacy_site = root / "site-packages"
@@ -95,7 +95,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_runtime_modules_requires_successful_import(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             site = root / "site-packages-x64"
             site.mkdir()
             (site / "broken_can.py").write_text("raise AttributeError('broken dependency')\n", encoding="utf-8")
@@ -192,7 +192,7 @@ class CanMiddlewareTests(unittest.TestCase):
         fake_can = types.SimpleNamespace(BusABC=FakeBusABC, Message=FakeMessage, Bus=reject_canalystii)
         fake_controlcan = types.SimpleNamespace(ControlCan=FakeControlCan, parse_dev_type=lambda value: int(value, 0))
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "ControlCAN.dll"
             dll.write_bytes(b"not-a-real-pe")
             config = write_driver_config(root, {"controlcan": {"dll": str(dll)}})
@@ -223,7 +223,7 @@ class CanMiddlewareTests(unittest.TestCase):
             ),
         }
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "ControlCAN.dll"
             dll.write_bytes(b"trusted-driver")
             config = write_driver_config(root, {"controlcan": {"dll": str(dll)}})
@@ -259,7 +259,7 @@ class CanMiddlewareTests(unittest.TestCase):
             ),
         }
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "zlgcan.dll"
             dll.write_bytes(b"trusted-driver")
             config = write_driver_config(root, {"zcanpro": {"dll": str(dll)}})
@@ -288,7 +288,7 @@ class CanMiddlewareTests(unittest.TestCase):
             ZCAN_CloseDevice=lambda *_args: events.append("close") or 1,
         )
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "zlgcan.dll"
             dll.write_bytes(b"trusted-driver")
             config = write_driver_config(root, {"zcanpro": {"dll": str(dll)}})
@@ -306,7 +306,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_workspace_dll_is_rejected_before_subprocess_or_ctypes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             trusted = root / "vendor" / "zlgcan.dll"
             trusted.parent.mkdir()
             trusted.write_bytes(b"trusted-driver")
@@ -328,7 +328,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_driver_hash_mismatch_makes_capability_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "ControlCAN.dll"
             dll.write_bytes(b"actual")
             config = write_driver_config(root, {"controlcan": {"dll": str(dll), "sha256": hashlib.sha256(b"expected").hexdigest()}})
@@ -339,7 +339,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_symlinked_driver_is_not_trusted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             real_dll = root / "vendor" / "ControlCAN.dll"
             real_dll.parent.mkdir()
             real_dll.write_bytes(b"trusted-driver")
@@ -356,7 +356,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
     def test_zcanpro_loader_rejects_unconfigured_path_before_ctypes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             trusted = root / "vendor" / "zlgcan.dll"
             trusted.parent.mkdir()
             trusted.write_bytes(b"trusted-driver")

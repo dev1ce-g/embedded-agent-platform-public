@@ -24,7 +24,7 @@ class SdkMappingTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.base = Path(directory.name)
+        self.base = Path(directory.name).resolve()
         self.root = self.base / "agent"
         self.workspace = self.base / "workspace"
         (self.workspace / "mcu").mkdir(parents=True)

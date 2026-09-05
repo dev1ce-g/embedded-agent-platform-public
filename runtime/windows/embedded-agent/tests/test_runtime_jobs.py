@@ -79,7 +79,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_build_request_rebuilds_fixed_runtime_command(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.build_request("job-build")
             command = job_runner.build_controlled_command(
                 request,
@@ -92,7 +92,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_jenkins_request_rebuilds_fixed_runtime_command(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.jenkins_request("job-jenkins")
             command = job_runner.build_controlled_command(
                 request,
@@ -126,14 +126,14 @@ class RuntimeJobRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             request = self.jenkins_request("job-tampered-connection")
             request["parameters"]["server"] = "https://attacker.example"
-            request["parameters"]["config"] = str(Path(temp) / "stolen.json")
+            request["parameters"]["config"] = str(Path(temp).resolve() / "stolen.json")
             with self.assertRaises(ValueError) as raised:
-                job_runner.build_controlled_command(request, root=Path(temp))
+                job_runner.build_controlled_command(request, root=Path(temp).resolve())
         self.assertIn("unsupported fields: config, server", str(raised.exception))
 
     def test_runner_rejects_command_only_legacy_request_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = self.write_job(
                 root,
                 {
@@ -151,7 +151,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_injected_command_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.build_request("job-tampered")
             request["command"] = ["powershell", "-Command", "Write-Output compromised"]
             job_dir = self.write_job(root, request)
@@ -164,7 +164,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_unknown_kind_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.build_request(
                 "job-unknown",
                 kind="shell",
@@ -181,7 +181,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_background_replaced_after_job_was_queued(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.build_request("job-background-replaced")
             job_dir = self.write_job(root, request)
             background_path = root / "projects" / "demo" / "background.json"
@@ -198,7 +198,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_missing_background_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             request = self.build_request("job-background-missing")
             job_dir = self.write_job(root, request)
             (root / "projects" / "demo" / "background.json").unlink()
@@ -220,7 +220,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
                 return 0
 
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = self.write_job(root, self.build_request("job-success"))
             child = {"ok": True, "operation": "build", "exit_code": 0}
 
@@ -248,7 +248,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
                 return 0
 
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = self.write_job(root, self.build_request("job-empty-result"))
             with mock.patch.object(job_runner.subprocess, "Popen", return_value=EmptySuccessfulProcess()):
                 self.assertEqual(job_runner.run_job(job_dir), 1)
@@ -261,7 +261,7 @@ class RuntimeJobRunnerTests(unittest.TestCase):
 
     def test_cancel_marker_before_start_prevents_child_execution(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = self.write_job(root, self.build_request("job-canceled"))
             (job_dir / "cancel.requested").write_text("{}", encoding="utf-8")
             with mock.patch.object(job_runner.subprocess, "Popen") as popen:
@@ -351,7 +351,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_start_persists_v2_parameters_without_a_command(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             args = self.start_args(root=root)
             args.job_action = "start"
             args.json = True
@@ -385,7 +385,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_jenkins_start_persists_only_connection_id_not_origin_or_credentials(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             args = self.start_args(
                 root=root,
                 kind="jenkins-wait",
@@ -419,7 +419,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_output_is_incremental_and_bounded(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = root / "jobs" / "job-output"
             job_dir.mkdir(parents=True)
             (job_dir / "status.json").write_text(json.dumps({"job_id": "job-output", "state": "running"}), encoding="utf-8")
@@ -437,7 +437,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_terminal_v1_status_remains_readable(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = root / "jobs" / "job-failed"
             job_dir.mkdir(parents=True)
             status = {
@@ -459,7 +459,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_startup_failure_becomes_terminal_with_runner_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
-            job_dir = Path(temp)
+            job_dir = Path(temp).resolve()
             (job_dir / "status.json").write_text(json.dumps({"job_id": "failed", "state": "queued"}), encoding="utf-8")
             (job_dir / "runner.log").write_text("runner import failed\n", encoding="utf-8")
             launcher = mock.Mock()
@@ -471,7 +471,7 @@ class RuntimeJobCommandTests(unittest.TestCase):
 
     def test_cancel_requires_confirmation_before_marker_write(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             job_dir = root / "jobs" / "job-running"
             job_dir.mkdir(parents=True)
             (job_dir / "status.json").write_text(json.dumps({"job_id": "job-running", "state": "running"}), encoding="utf-8")

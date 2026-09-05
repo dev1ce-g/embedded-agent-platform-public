@@ -35,7 +35,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_backend_artifact_discovery_ignores_external_symlink(self) -> None:
         module = load_module("agent_backend_common_symlink_test", BIN / "agent_backend_common.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             artifacts = root / "artifacts"
             artifacts.mkdir()
             outside = root / "outside.axf"
@@ -63,7 +63,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_jlink_flash_gate_closes_before_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            completed = self.run_adapter(Path(directory), "flash-mcu-jlink.py")
+            completed = self.run_adapter(Path(directory).resolve(), "flash-mcu-jlink.py")
         value = json.loads(completed.stdout)
         self.assertEqual(completed.returncode, 3)
         self.assertTrue(value["requires_human_confirm"])
@@ -71,7 +71,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_mpu_build_rejects_symlinked_embedded_builds_before_docker(self) -> None:
         module = load_module("build_mpu_output_symlink_test", BIN / "build-mpu.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             outside = root / "outside"
             workspace.mkdir()
@@ -102,7 +102,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_mpu_build_rejects_external_artifact_root_before_docker(self) -> None:
         module = load_module("build_mpu_external_output_test", BIN / "build-mpu.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             outside = root / "outside"
             workspace.mkdir()
@@ -135,7 +135,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_mpu_build_rejects_unsafe_existing_container_before_exec(self) -> None:
         module = load_module("build_mpu_container_isolation_test", BIN / "build-mpu.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             workspace.mkdir()
             base_document = {
@@ -253,7 +253,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_mpu_container_isolation_preserves_read_only_mounts(self) -> None:
         module = load_module("build_mpu_read_only_mount_test", BIN / "build-mpu.py")
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory) / "workspace"
+            workspace = Path(directory).resolve() / "workspace"
             workspace.mkdir()
             document = {
                 "Mounts": [
@@ -297,7 +297,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_jlink_probe_reports_missing_tool_without_running_device(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            completed = self.run_adapter(Path(directory), "jlink-probe.py", "-JLinkPath", str(Path(directory) / "missing.exe"))
+            completed = self.run_adapter(Path(directory).resolve(), "jlink-probe.py", "-JLinkPath", str(Path(directory).resolve() / "missing.exe"))
         value = json.loads(completed.stdout)
         self.assertEqual(completed.returncode, 127)
         self.assertIn("JLink not found", value["first_failure"])
@@ -310,7 +310,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_rtt_jlink_script_supports_native_paths(self) -> None:
         module = load_module("rtt_capture_native_path_test", BIN / "rtt-capture-mcu.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             script = root / "capture.jlink"
             control_block = root / "工具与自动化" / "rtt-cb.bin"
             control_block.parent.mkdir()
@@ -321,7 +321,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_rtt_jlink_script_rejects_device_command_injection(self) -> None:
         module = load_module("rtt_capture_device_injection_test", BIN / "rtt-capture-mcu.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             with self.assertRaisesRegex(ValueError, "device"):
                 module.write_jlink_script(
                     root / "capture.jlink",
@@ -334,7 +334,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_rtt_rejects_malicious_keil_device_before_starting_jlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             mdk = workspace / "mcu" / "project" / "mdk"
             objects = mdk / "Objects"
@@ -384,7 +384,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_jlink_flash_script_rejects_all_interpolated_injections(self) -> None:
         module = load_module("jlink_flash_injection_test", BIN / "flash-mcu-jlink.py")
         with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / "application.bin"
+            binary = Path(directory).resolve() / "application.bin"
             binary.write_bytes(b"firmware")
             invalid_values = (
                 ("S32K312\nexit", "SWD", "1000", "0x00400000", binary),
@@ -401,7 +401,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_jlink_flash_script_quotes_binary_path(self) -> None:
         module = load_module("jlink_flash_path_test", BIN / "flash-mcu-jlink.py")
         with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / "固件 image.bin"
+            binary = Path(directory).resolve() / "固件 image.bin"
             binary.write_bytes(b"firmware")
             commands, normalized = module.flash_commands(
                 "S32K312",
@@ -421,7 +421,7 @@ class PythonAdapterTests(unittest.TestCase):
         finally:
             sys.path.pop(0)
         with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "flash.log"
+            log = Path(directory).resolve() / "flash.log"
             log.write_bytes(b"Erase Done.\rProgramming Done.\rVerify OK.\rApplication running ...\r")
             erase = module.marker(log, "Erase Done.", (r"Erase Done\.?",))
             programming = module.marker(log, "Programming Done.", (r"Programming Done\.?",))
@@ -432,7 +432,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_keil_flash_requires_exact_discovered_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             workspace = root / "workspace"
             project = workspace / "mcu" / "project" / "mdk" / "application.uvprojx"
             project.parent.mkdir(parents=True)
@@ -472,7 +472,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_controlcan_probe_rejects_cli_dll_without_machine_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            completed = self.run_adapter(Path(directory), "probe-controlcan.py", "one", "-Dll", str(Path(directory) / "missing.dll"))
+            completed = self.run_adapter(Path(directory).resolve(), "probe-controlcan.py", "one", "-Dll", str(Path(directory).resolve() / "missing.dll"))
         value = json.loads(completed.stdout)
         self.assertEqual(completed.returncode, 2)
         self.assertFalse(value["ok"])
@@ -481,7 +481,7 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_zcanpro_probe_rejects_workspace_dll_without_machine_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dll = root / "zlgcan.dll"
             content = bytearray(256)
             content[0x3C:0x40] = (128).to_bytes(4, "little")
@@ -504,7 +504,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_runtime_upgrade_removes_retired_model_launcher(self) -> None:
         module = load_module("windows_runtime_install_test", AGENT_HOME / "install.py")
         with tempfile.TemporaryDirectory() as directory:
-            prefix = Path(directory) / "installed-runtime"
+            prefix = Path(directory).resolve() / "installed-runtime"
             obsolete = prefix / "bin" / "claude-start.py"
             obsolete.parent.mkdir(parents=True)
             obsolete.write_text("legacy launcher\n", encoding="utf-8")
@@ -513,9 +513,9 @@ class PythonAdapterTests(unittest.TestCase):
 
     def test_stable_entry_accepts_encoded_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            machine_install = Path(directory) / "machine-install"
-            payload_root = Path(directory) / "payload-controlled-state"
-            attacker = Path(directory) / "attacker.py"
+            machine_install = Path(directory).resolve() / "machine-install"
+            payload_root = Path(directory).resolve() / "payload-controlled-state"
+            attacker = Path(directory).resolve() / "attacker.py"
             attacker.write_text("raise SystemExit('must not run')\n", encoding="utf-8")
             payload = base64.b64encode(
                 json.dumps(
@@ -529,7 +529,7 @@ class PythonAdapterTests(unittest.TestCase):
             ).decode("ascii")
             environment = os.environ.copy()
             environment["EMBEDDED_AGENT_INSTALL_ROOT"] = str(machine_install)
-            environment["EMBEDDED_AGENT_ROOT"] = str(Path(directory) / "env-controlled-state")
+            environment["EMBEDDED_AGENT_ROOT"] = str(Path(directory).resolve() / "env-controlled-state")
             environment["EMBEDDED_AGENTCTL"] = str(attacker)
             environment["EMBEDDED_SDK_MANAGER"] = str(attacker)
             completed = subprocess.run(
@@ -587,7 +587,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_stable_entry_rejects_symlink_backend_resource(self) -> None:
         module = load_module("stable_embedded_agent_symlink_test", BIN / "embedded-agent.py")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             trusted_dir = root / "bin"
             trusted_dir.mkdir()
             attacker = root / "attacker.py"

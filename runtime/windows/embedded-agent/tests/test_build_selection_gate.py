@@ -21,7 +21,7 @@ from embedded_runtime_operations import command_build  # noqa: E402
 class BuildSelectionGateTests(unittest.TestCase):
     def test_build_rejects_stale_background_before_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             project_dir = root / "projects" / "sample"
             workspace = root / "workspace"
             project_dir.mkdir(parents=True)
@@ -61,7 +61,7 @@ class BuildSelectionGateTests(unittest.TestCase):
 
     def test_keil_build_requires_user_selected_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             project_dir = root / "projects" / "sample"
             workspace = root / "workspace"
             project_dir.mkdir(parents=True)
