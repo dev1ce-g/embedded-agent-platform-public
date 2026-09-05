@@ -1,4 +1,4 @@
-name: Runtime tests
+name: Platform software acceptance
 
 on:
   push:
@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  runtime:
-    name: Runtime (${{ matrix.os }})
+  software:
+    name: Software tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,7 +46,17 @@ jobs:
         if: runner.os == 'Linux'
         run: python -m unittest discover -s bootstrap/tests -v
 
-      - name: Check Mac wrapper syntax
+      - name: Check POSIX installer and adapter syntax
         if: runner.os == 'Linux'
         shell: bash
-        run: bash -n runtime/mac/bin/embedded-agent
+        run: bash -n install.sh runtime/mac/bin/embedded-agent runtime/wsl/bin/embedded-agent
+
+      - name: Smoke installed Windows launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP "embedded-agent-platform-runtime"
+          python runtime/windows/install.py --prefix $prefix --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$prefix\embedded-agent.cmd" status --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

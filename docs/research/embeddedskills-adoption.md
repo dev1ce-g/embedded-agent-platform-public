@@ -16,7 +16,7 @@ License。本仓库只借鉴设计概念，没有复制上游脚本。
 | Keil | 已重写 | 已有 `embedded-keil-build` | 保留工程和 Target 显式选择、结构化产物；构建改走 Runtime 和 Build Receipt。 |
 | J-Link | 已重写 | 已有 `embedded-jlink-debug` | 保留 device、probe、RTT 和 GDB 分层；烧写绑定 Build Receipt 和设备 Gate。 |
 | CAN | 本次新增 | `skills/embedded-can-runtime` | Runtime 已提供 ControlCAN、ZCANPro、有限时监控、发送和 UDS 固定命令。 |
-| Workflow | 合并概念 | Trellis Workflow 和 Runtime Spec 已覆盖 | 使用项目 Context、Background 和 Receipt，不增加第二套 `.embeddedskills/state.json`。 |
+| Workflow | 不采纳 | 平台不提供强制 Workflow | 使用项目 Context、Runtime Background 和 Receipt，不增加第二套 `.embeddedskills/state.json`。 |
 | GCC/CMake | 候选 | Runtime 只有项目化 MPU 构建入口 | 增加通用 Skill 前，需要定义 CMake 工程发现、preset 选择和 Build Receipt contract。 |
 | Serial | 暂缓 | 当前只支持 ADB TTY 元数据检查 | 串口负载读取会消费数据。先增加端口所有权、有限时采集和发送 Gate 的 Runtime 命令。 |
 | OpenOCD | 暂缓 | 无受控 Runtime Adapter | 上游包含擦除、复位、写内存和 raw 命令，不能绕过平台设备 Gate。 |

@@ -1,98 +1,120 @@
 # Embedded Agent Platform 能力模型
 
-本文定义平台的稳定架构。平台面向嵌入式项目的完整生命周期，不把某台主机固定为
-「规划端」或「执行端」。Mac、WSL、Windows 或其他已连接主机上的 Codex 任务，只要具备
-所需仓库、工具和授权，都可以从需求澄清、架构设计开始接手项目，并持续完成实现、验证
-和交付。
+本文定义平台的稳定边界。平台面向存量和异构嵌入式工程，不把某个模型、工作流、主机或
+厂商工具作为核心依赖。
 
 ## 核心模型
 
 ```text
-项目目标与授权
-  -> Trellis 工作流和任务契约
-  -> Embedded Platform Core
-       - 项目发现与活动目标证明
-       - 架构、状态和安全规则
-       - 实现、审查与验证流程
-       - 证据和交付契约
+模型或 Agent
+  -> Context Plane
+       - Engineering Rules
+       - 生成的项目与 Target 事实
+       - 项目长期知识
+  -> Capability Contract
+       - discover / preflight
+       - execute / status
+       - evidence
   -> Capability Adapter
-       - 本地仓库与本地工具
+       - 本地仓库与工具
        - Windows Native Runtime
-       - WSL/Windows 互操作
-       - 远程 Codex 任务
-       - CI、调试器和设备
+       - WSL / SSH 传输
+       - CI、调试器和实验室设备
 ```
 
-平台核心提供稳定的工程语义。主机、传输方式和工具链是可替换的 Adapter。任务根据能力
-选择 Adapter，不根据主机名称预先分配角色。
+模型负责理解目标、制定计划和选择能力。平台负责回答三个可验证问题：
 
-## Agent 所有权
+1. 当前实际生效的工程、Target、源码和工具链是什么。
+2. 当前环境允许执行哪些受控操作，副作用和资源所有权是什么。
+3. 每个结果对应哪些命令、日志、制品、设备和源码证据。
 
-一个 Codex 任务可以拥有完整项目，也可以只承担有界子任务。所有权由当前任务契约决定：
+当前 Runtime 已接入统一结果信封、类型化持久 Job 和既有操作 Gate；Catalog、持久化
+Preflight、作用域化 Approval 与终态 Receipt 仍是下一阶段实现，不应被调用方视为已经可用的
+公共命令。
 
-- 完整项目所有者负责需求、架构、计划、实现、验证和最终结论。
-- 委派只转移明确结果及其允许的写入范围，不默认转移最终决策权。
-- 任务可以在同一主机完成全部工作，也可以按工具、设备或上下文需要跨主机路由。
-- 同一工作区同时只允许一个 writer。并行实现使用独立 worktree 或独立工作区。
-- 任务位置不会扩大授权。烧写、复位、签名、发布和生产操作仍需各自的 Gate。
+平台不要求模型公开内部思维链，也不把 Intake、Design、Implement 等阶段实现成必须通过的
+状态机。
 
-Mac 编排、Windows 编译是受支持的部署拓扑，但不是平台的固定职责模型。Windows Codex
-任务可以直接创建 Trellis task、完成架构设计和修改源码；Mac Codex 任务也可以在本机
-工具满足要求时完成实现与验证。
+## Context Plane
 
-## Platform Core
+项目投影位于 `.embedded-agent/`：
 
-Platform Core 是深模块。它通过较小的 Interface 提供以下能力：
+| 路径 | 所有者 | 内容 |
+| --- | --- | --- |
+| `rules/platform/` | 平台 | 当前安装的通用工程规则 |
+| `rules/project/` | 项目 | 项目自有约束和规则覆盖 |
+| `context/` | Discovery / Bootstrap | 工程、Target、仓库、工具链、能力事实及生成的知识索引 |
+| `knowledge/` | 项目 | 经确认的架构、决策、故障和操作知识 |
 
-- 将自然语言需求转为明确的目标、非目标、约束、授权和验收标准。
-- 证明活动工程、Target、SDK、配置、调用链和制品来源。
-- 路由命中的嵌入式 Spec，并维护项目事实、推断和待确认项。
-- 保护状态所有权、并发、生命周期、协议、硬件和安全约束。
-- 按风险选择静态检查、单元测试、主机构建、CI 或硬件验证。
-- 保存命令、退出码、首个失败点、日志、制品哈希和未覆盖风险。
+生成事实必须包含来源和置信度。文档可以被自动索引，但未经确认的推断不能自动升级为项目
+规范。Project Rule 与 Knowledge 不由 Bootstrap 静默覆盖。
 
-项目 Agent 面向这个 Interface 工作，不复制 Keil、J-Link、Jenkins、ADB、CAN 或不同
-操作系统的实现细节。
+## Capability Contract
+
+Capability Contract 是平台最稳定的公共边界。调用者只提交有类型的操作和参数，Adapter
+返回统一结果与证据，不能传入任意 shell。
+
+完整有状态生命周期的目标请求契约至少声明（Catalog/Preflight/Approval/Receipt Handler
+尚未全部接线）：
+
+- operation、capability 和 risk class；
+- project/target/artifact 引用（适用时）；
+- 有界参数和预期观测；
+- 外部状态变更所需确认。
+
+当前已接线的结果信封至少包含：
+
+- contract/schema version、operation、ok、exit code 和时间；
+- first failure 或成功标记；
+- 项目、Target、源码、工具链与设备身份（适用时）；
+- 日志、Job 和制品引用；
+- 实际完成的验证层级。
+
+JSON Schema 见 `contracts/`。CLI、Skill、MCP 或其他协议 Adapter 最终都必须进入同一
+Runtime Core，不能形成第二套 Gate 与执行逻辑。
 
 ## Capability Adapter
 
-Adapter 只处理特定环境中的差异：
-
 | Adapter | 适用能力 | 约束 |
 | --- | --- | --- |
-| Local | 本地源码、测试、文档和本地工具 | 服从项目规则和工作区状态 |
-| Windows Native Runtime | Keil、J-Link、CAN、ADB、Jenkins、SDK 和设备 | 固定命令、Gate、JSON 和证据 |
-| WSL interop | 从 WSL 使用 Windows Native Runtime | 保持 Runtime contract，不重写业务逻辑 |
-| Remote Codex task | 把有界结果交给另一主机或项目任务 | 消息自包含，一个工作区一个 writer |
-| Git synchronization | 在多个工作区之间传递源码状态 | branch/commit SHA 明确，禁止覆盖脏工作区 |
+| Local | 源码、静态检查、本地测试和文档 | 服从项目规则与工作区状态 |
+| Windows Native Runtime | Keil、J-Link、CAN、ADB、Jenkins、设备及 SDK 映射表面 | 固定命令、Gate、JSON 和证据；SDK Manager 尚未发布 |
+| WSL / SSH transport | 参数数组跨主机转发 | 不重写 Runtime 业务逻辑 |
+| CI / Lab backend | 持久构建、HIL、设备租约 | 明确 Job、资源所有权和超时 |
+| Simulator | Renode/QEMU 等虚拟 Target | 不把仿真结果冒充真实硬件证据 |
 
-Windows Native Runtime 封装 Windows 路径、编码、进程位数、凭据、工具发现和设备访问。
-只有任务需要这些能力时才加载对应 Spec 和 Runtime；本地架构设计、代码审查或无需
-Windows 工具的实现不应被强制路由到 Windows。
+任务按能力选择 Adapter，不按主机名称预设角色。任何具备仓库、上下文、工具和授权的 Agent
+都可以拥有需求、架构、实现、验证和交付。
 
-## Trellis 工作流
+## 安全与资源
 
-Trellis 工作流保持主机无关：
+- 同一工作区只允许一个 writer；并行写入使用独立 worktree 或工作区。
+- Flash、reset、CAN transmit、NVM/eFuse、签名、发布和生产操作必须显式确认。
+- Probe、串口、CAN 通道、DUT 和电源等共享资源应由 Adapter 提供 lease/互斥语义。
+- Runtime 失败表示能力不可用，不授权调用方绕过固定 Interface。
+- 路径、工具、目标和制品必须先解析为平台已发现的对象，再允许有副作用的操作。
 
-1. Intake：冻结目标、授权、非目标和验收标准。
-2. Discover：确认活动仓库、工程、Target、工具链和项目规则。
-3. Design：记录架构决策、状态所有权、接口和验证策略。
-4. Implement：在唯一 writer 工作区完成最小充分改动。
-5. Verify：按行为风险取得对应层级的实际证据。
-6. Deliver：提交可审查差异，记录已验证和未验证内容。
+当前机器级工具路径/PATH 由管理员配置并受 ACL 保护；Keil 工程 Hook、项目构建脚本和既有
+MPU Builder Container 仍属于可执行的受信输入，并非完整宿主沙箱。在 Phase 3b Preflight
+接线前，只登记可信工作区，并使用最小权限 Runtime 账户和没有额外可写宿主挂载、Docker
+Socket、Privileged/Host Namespace、额外设备或 Capability 的专用容器。
 
-跨主机只是某一步的能力路由。任务不应因为切换主机而重新开始需求或架构阶段，也不应
-把 Runtime Job、Codex 子代理和用户可见的远程 Codex 任务混为同一种对象。
+## 参考工程生命周期
+
+需求澄清、Discover、Design、Implement、Verify、Deliver 是推荐检查视角，不是平台工作流。
+模型可以根据任务复杂度合并、回退或跳过不适用阶段，但必须始终满足：
+
+- 写入前知道目标、范围、所有者和禁止动作；
+- 改动前证明活动 Target；
+- 有副作用操作前通过对应 Gate；
+- 交付时逐层陈述实际证据和未验证风险。
 
 ## 完成标准
 
 平台变更完成时，应能回答：
 
-- 哪个任务拥有最终结果，哪些工作被委派。
-- 哪个工作区和 Commit 是源码真相。
-- 使用了哪些 Adapter，以及选择原因。
-- 每个声明对应什么验证证据。
-- 哪些风险未覆盖，恢复或继续路径是什么。
-
-具体 Windows 拓扑见 [主机拓扑与能力路由](dual-machine-agent-system.md)。Windows 部署
-内容见 [Windows Runtime 源码与运行资产](../operations/windows-runtime-assets.md)。
+- 哪个 Agent、工作区和 Commit 拥有结果。
+- 使用了哪些上下文及其来源、版本和新鲜度。
+- 调用了哪些 Capability Adapter，风险级别和授权是什么。
+- 每个声明对应什么可重放证据。
+- 哪些层级未验证，下一步如何恢复或继续。

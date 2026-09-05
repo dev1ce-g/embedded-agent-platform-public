@@ -1,41 +1,56 @@
 # Embedded Agent Platform 开发规则
 
-本仓库维护 Embedded Platform Core、Trellis Spec、项目接入脚本和主机能力 Adapter。任意
-具备所需能力的 Agent 都可以拥有完整项目；主机不预设规划或执行角色。修改仓库时，先
-识别所属层，再读取对应文档和测试；不要把产品项目事实写入平台模板。
+本仓库维护模型无关的 Embedded Context Plane、Engineering Rule Pack、Capability
+Contract 和主机能力 Adapter。模型或 Agent 负责推理与任务编排；平台只负责提供可追溯
+上下文、受控工具、风险门禁和结构化证据。
 
 ## 入口
 
-- 改 bootstrap、模板安装或项目投影：读取 `docs/architecture/embedded-bootstrap-and-marketplace.md`、`bootstrap/tests/test_embedded_bootstrap.py`。
-- 改任务所有权、主机路由或平台边界：读取 `docs/architecture/platform-capability-model.md`、`marketplace/specs/embedded-dual-machine-v1/platform-operating-model.md` 和 `agent-governance.md`。
-- 改跨主机同步或 Windows 拓扑：读取 `docs/architecture/dual-machine-agent-system.md`。
-- 改 Windows 命令、Jenkins、构建、日志或设备操作：读取 `marketplace/specs/embedded-dual-machine-v1/embedded-runtime-workflow.md` 及命中领域的 Spec；Runtime 的固定命令面、Gate 和结构化证据属于公共 contract。
-- 改项目级 Agent 行为：保持根 `AGENTS.md` 为短入口，详细规则放入 `.trellis/spec/`，并通过 bootstrap 测试验证首次安装、重复安装和冲突保留。
+- 改项目初始化、规则投影或迁移：读取
+  `docs/architecture/project-projection-and-context.md` 和 bootstrap 测试。
+- 改任务所有权、主机路由或平台边界：读取
+  `docs/architecture/platform-capability-model.md`、
+  `rules/embedded-engineering-v1/platform-operating-model.md` 和
+  `rules/embedded-engineering-v1/agent-governance.md`。
+- 改公共 JSON、Gate、Job 或证据字段：读取 `contracts/README.md`。公共字段必须保持
+  向后兼容，或明确提升 contract major version。
+- 改 Windows 命令、Jenkins、构建、日志或设备操作：读取
+  `rules/embedded-engineering-v1/windows-runtime-capabilities.md` 及命中领域的 Rule。
+- 改项目级 Agent 行为：保持项目根 `AGENTS.md` 为短入口，详细规则放入
+  `.embedded-agent/rules/project/` 或可复用 Rule Pack。
 
 ## 分层边界
 
-- `marketplace/` 只发布可复用 Spec，不包含机器凭据、项目事实、任务状态或运行产物。
-- `skills/` 发布与平台 Runtime 配套的 Agent Skill；Skill 只负责意图路由、固定命令选择、Gate 和证据解释，不复制 Runtime 实现。
-- `bootstrap/` 负责幂等接入、项目级 `AGENTS.md` 补充块、Spec 安装、Discovery 和 Workspace Manifest；不得执行构建、Jenkins、烧写或设备操作。
-- `runtime/mac/` 是兼容传输 Adapter，只负责受控传输和参数转发。
-- `runtime/wsl/` 是 Windows 互操作 Adapter，只把参数数组交给固定的 Windows Python 入口，不实现第二套业务逻辑。
-- `runtime/windows/` 是 Windows 能力 Adapter，负责固定命令面、路径约束、操作 Gate、日志和证据；不得增加任意 shell 传递。
-- `docs/architecture/` 解释稳定架构与所有权；命令级强制规则以代码、测试和 `marketplace/specs/` 为准。
+- `rules/` 发布可复用工程规则，不包含机器凭据、项目事实、任务状态或运行产物。
+- `contracts/` 定义模型、客户端和 Adapter 之间的稳定数据契约。
+- `skills/` 只负责意图路由、固定命令选择、Gate 和证据解释，不复制 Runtime 实现。
+- `bootstrap/` 负责幂等接入、`AGENTS.md` managed block、Rule Pack、Discovery、迁移和
+  Workspace Manifest；不得执行构建、CI、烧写或设备操作。
+- `runtime/mac/` 和 `runtime/wsl/` 是传输 Adapter，不实现第二套业务逻辑。
+- `runtime/windows/` 负责固定命令、路径约束、操作 Gate、持久 Job、日志和证据；不得
+  增加任意 shell 传递，也不得启动或绑定某个特定模型。
+- `.embedded-agent/context/` 是生成事实；`.embedded-agent/rules/project/` 与
+  `.embedded-agent/knowledge/` 是项目所有内容，Bootstrap 不得覆盖或整体忽略。
 
 ## 变更规则
 
-- 修改前执行 `git status --short --branch` 和目标文件 diff，保护并存的用户改动。本仓库经常同时开发 Runtime 功能，避免无关格式化和整文件重写。
-- 新增 Runtime 命令或输出字段时，同时更新所有受影响的主机 Adapter、README/Spec 和测试；JSON schema、错误码、Gate 或路径边界按公共 Interface 处理。
-- 新增项目级规则时优先写正向完成条件和精确指针。避免在全局 `~/.codex/AGENTS.md` 重复嵌入式细节。
-- 新增或修改平台 Skill 时，同步更新 `skills/index.json`，运行 Skill 校验，并保持 Runtime contract 为命令面唯一来源。
-- 修改安装行为必须保持幂等：首次创建、内容相同跳过、项目已有内容保留、平台更新以 managed block 或候选文件呈现。
-- 任何会构建、触发 CI、推送、发布、签名、烧写、复位或操作设备的测试都不是默认测试；需要用户明确授权和对应 Gate。
+- 修改前检查 Git 状态和目标文件差异，保护并存的用户改动；避免无关格式化。
+- 新增 Runtime 命令或输出字段时，同步更新 Adapter、文档、Contract 和测试。
+- 新增规则时优先写完成条件、风险边界和精确来源，不规定模型内部思维链。
+- 安装与迁移必须幂等、非破坏：相同内容跳过，冲突生成候选或失败，禁止静默覆盖项目
+  规则与知识。
+- 旧 `.trellis/` 只有显式迁移命令可以读取内容；其他路径只允许检测其存在或将其排除在
+  扫描之外。迁移不得调用 Trellis、删除旧目录或恢复旧 workflow/tasks 为活动平台状态。
+- 任何构建、CI、推送、发布、签名、烧写、复位或设备操作都不是默认测试。
 
 ## 验证
 
-- Bootstrap、Spec 或项目投影：`PYTHONPYCACHEPREFIX=/tmp/embedded-agent-platform-pycache python3 -m unittest discover -s bootstrap/tests -v`。
-- Windows Runtime Python：运行 `runtime/windows/embedded-agent/tests/` 中与改动直接相关的测试；跨平台逻辑至少运行该目录全量测试。
-- Mac wrapper：运行 `bootstrap/tests/test_mac_embedded_agent_wrapper.py` 及 `bash -n runtime/mac/bin/embedded-agent`。
-- 文档和模板：运行 `git diff --check`，并在临时 Git 仓库验证生成文件、重复运行和 `git info/exclude`。
+- Bootstrap、Rule 或项目投影：
+  `PYTHONPYCACHEPREFIX=/tmp/embedded-agent-platform-pycache python3 -m unittest discover -s bootstrap/tests -v`
+- Windows Runtime：在 `runtime/windows/embedded-agent/` 运行
+  `PYTHONPYCACHEPREFIX=/tmp/embedded-agent-platform-pycache python3 -m unittest discover -s tests -v`
+- Shell Adapter：`bash -n install.sh runtime/mac/bin/embedded-agent runtime/wsl/bin/embedded-agent`
+- 文档与模板：运行 `git diff --check`，并在临时 Git 仓库验证首次安装、重复安装、冲突和
+  无 Trellis 环境。
 
-交付时区分本机测试、Windows 构建、Jenkins 和硬件验证；只声明实际取得证据的层级。
+交付时区分本机测试、Windows 构建、CI 和硬件验证，只声明实际取得证据的层级。

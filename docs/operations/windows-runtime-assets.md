@@ -13,31 +13,36 @@ GitHub 仓库是可复用源码和文档的唯一真相。Windows 目录是部�
 | `runtime/windows/bin/` | `<install-root>\bin\` | Python 后端和兼容入口 |
 | `runtime/windows/embedded-agent/` | `<install-root>\embedded-agent\` | Runtime Core、测试和 README |
 | `runtime/windows/can-runtime/` | `<install-root>\can-runtime\` | CAN 依赖清单和安装器 |
+| `runtime/windows/*-connections.example.json` | `<install-root>\` | Jenkins/Aboot 机器绑定模板 |
+| `VERSION` | `<install-root>\VERSION` | 已部署平台版本 |
 
 部署文件有修改时，先回收到本仓库，再测试、提交和重新部署。不要把 Windows 部署目录
 作为长期源码分支。
 
 ## 当前 Runtime
 
-Runtime contract 版本以实际安装后的 `status --json` 为准。Windows 和 WSL 入口不依赖
-作者机器上的历史路径或备份文件名。
+实际安装后的 `status --json` 同时报告 `platform_version`、Capability Contract 版本与
+关键源码哈希。三者是不同的兼容轴；平台版本来自安装根的 `VERSION`。Windows 和 WSL 入口
+不依赖作者机器上的历史路径或备份文件名。
 
-当前受控能力包括项目发现、Git、SDK、构建、Jenkins、日志、J-Link、ADB、Aboot、CAN、
-持久 Job、Gate 和结构化证据。CAN Runtime 使用分离的 x86/x64 Python 依赖目录，以支持
-不同位数的驱动 DLL。
+当前受控能力包括项目发现、Git、SDK 映射/命令表面、构建、Jenkins、日志、J-Link、ADB、
+Aboot、CAN、持久 Job、Gate 和结构化证据。Runtime-owned SDK Manager 尚未随仓库发布，
+因此依赖它的 SDK 查询/拉取能力会 fail closed。CAN Runtime 使用分离的 x86/x64 Python
+依赖目录，以支持不同位数的驱动 DLL。
 
 ## 不进入 Git 的运行资产
 
 以下内容由机器运行时拥有，不上传 GitHub：
 
-- `credentials/`、机器配置和任何 token、password、cookie 或私钥。
-- `projects/`、`jobs/`、`logs/`、`sessions/` 和业务证据。
+- `credentials/`、`jenkins-connections.json`、`aboot-connections.json`、
+  `can-drivers.json` 和任何 token、password、cookie 或私钥。
+- `projects/`、`jobs/`、`logs/` 和业务证据。
 - `site-packages-x86/`、`site-packages-x64/`、wheelhouse 和 `__pycache__/`。
 - `backups/`、`*.bak-*`、`*.next`、`*.orig`、`*.swap-*` 和临时 `_fetch_*.py`。
 - 项目专用画像、设备日志、构建制品和业务源码副本。
 
 Windows 的 `agents/` 角色 Markdown 属于历史机器配置，不作为 Platform Core 源码。需要
-长期复用的 Agent 行为应写入项目 `AGENTS.md`、Trellis Spec 或专用 Skill。
+长期复用的 Agent 行为应写入项目 `AGENTS.md`、Engineering Rule 或专用 Skill。
 
 ## 部署检查
 

@@ -22,7 +22,7 @@ Mac
 Windows WSL2
   CodexHost Remote Host（可选）
   Codex / Claude Code / Pi 等 Harness
-  Trellis / AGENTS.md / Skills / Git 工作区
+  Engineering Rules / AGENTS.md / Skills / Git 工作区
                         │ 固定 CLI；以后可加受限 MCP adapter
                         ▼
 Windows Native
@@ -136,7 +136,7 @@ CodexHost 的 Mapping Store 默认位于 `$CODEXHOST_DATA_DIR/mapping-store` 或
 它不是完整 transcript 的唯一真相：例如 Claude adapter 会从 Harness 自身的 `~/.claude/projects/.../*.jsonl` 恢复历史。[`claude-transcript.ts`](https://github.com/BytePioneer-AI/codex-host/blob/51037e53bc8cf73143755efc65e25a895b627aa7/packages/adapters/claude-code/src/claude-transcript.ts#L23-L86) 因而本平台仍应保持分层状态：
 
 - CodexHost：展示会话与跨 Harness 映射；
-- Trellis task：目标、授权、决策和 handoff；
+- Active Context：目标、授权、决策和 handoff；
 - embedded-agent：Job、日志、artifact、Gate 和设备证据；
 - Harness：自身 Native Session/transcript。
 
@@ -172,7 +172,7 @@ CodexHost 的 Mapping Store 默认位于 `$CODEXHOST_DATA_DIR/mapping-store` 或
 ### P0：保持边界，完成 WSL 本地化
 
 1. 在 WSL Linux home 中克隆 embedded-agent-platform 和产品项目；
-2. 投影 Trellis、AGENTS.md、skills 与项目 task contract；
+2. 投影 `.embedded-agent` Context、AGENTS.md、Skills 与项目 task contract；
 3. 使用 WSL `embedded-agent` wrapper，通过 Windows interop 调固定 Python 入口；
 4. 保持 CLI 参数、JSON、退出码、Gate、日志和证据 contract 不变；
 5. Mac wrapper 保留为恢复/诊断入口。
@@ -216,7 +216,7 @@ Windows embedded-agent Runtime + Gate
 | 是否立即 MCP 化 | 否；先完成 WSL CLI adapter，再按收益增加受限 MCP |
 | 版本策略 | 锁定 release/精确 SHA，自行复跑，不跟随 `main` |
 | 权限策略 | CodexHost 权限仅作第一层；embedded-agent Gate 保持最终裁决 |
-| 状态策略 | CodexHost 会话映射、Trellis task、Runtime evidence 分开保存 |
+| 状态策略 | CodexHost 会话、Active Context、Runtime evidence 分开保存 |
 
 总体上，CodexHost 可以作为可插拔的 UI/Harness Adapter，但不能替代 Embedded Platform
 Core 或 Windows Native Runtime。试点应按任务能力选择主机：Windows/WSL 任务既可以
