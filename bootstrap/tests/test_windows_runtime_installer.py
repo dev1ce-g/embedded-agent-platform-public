@@ -42,9 +42,10 @@ class WindowsRuntimeInstallerTests(unittest.TestCase):
             self.assertEqual(registry["schema_version"], "embedded-jenkins-connections/v1")
             self.assertNotIn("password", json.dumps(registry).lower())
             self.assertNotIn("token", json.dumps(registry).lower())
+            # The installer resolves Windows short-name aliases in the prefix.
             self.assertEqual(
                 result["jenkins_connections_example"],
-                str(prefix / "jenkins-connections.example.json"),
+                str((prefix / "jenkins-connections.example.json").resolve()),
             )
             aboot_registry = json.loads(
                 (prefix / "aboot-connections.example.json").read_text(encoding="utf-8")
