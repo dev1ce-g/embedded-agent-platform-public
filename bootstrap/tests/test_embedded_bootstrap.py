@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
-import subprocess
-from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
-SCRIPTS = Path(__file__).resolve().parents[1]
+BOOTSTRAP = Path(__file__).resolve().parents[1]
 
 
 def load_module(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
+    spec = importlib.util.spec_from_file_location(name, BOOTSTRAP / filename)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[name] = module
@@ -23,327 +22,547 @@ def load_module(name: str, filename: str):
     return module
 
 
-bootstrap = load_module("trellis_embedded_init", "trellis_embedded_init.py")
-fallback = load_module("embedded_spec_installer", "embedded_spec_installer.py")
+# embedded_project imports the installer by its public module name.
+load_module("rule_bundle_installer", "rule_bundle_installer.py")
+project = load_module("embedded_project", "embedded_project.py")
 
 
-class BootstrapCommandTests(unittest.TestCase):
-    def test_registry_and_workflow_are_in_one_official_init_command(self):
-        args = bootstrap.parse_args(
-            [
-                "/tmp/project",
-                "--registry",
-                "gh:example/embedded-agent-platform/marketplace#v1",
-                "--template",
-                "embedded-dual-machine-v1",
-                "--workflow",
-                "native",
-                "--user",
-                "tester",
-                "--claude",
-            ]
+def snapshot_tree(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def init_args(target: Path, *extra: str):
+    return project.parse_args(
+        [
+            "init",
+            str(target),
+            "--discovery",
+            "skip",
+            "--no-git-exclude",
+            *extra,
+        ]
+    )
+
+
+class EmbeddedProjectInitTests(unittest.TestCase):
+    def make_project(self, root: Path) -> Path:
+        target = root / "project"
+        target.mkdir()
+        (target / "README.md").write_bytes(b"# Demo\n")
+        return target
+
+    def test_version_matches_repository_version_file(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(BOOTSTRAP / "embedded-project"), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
         )
 
-        command = bootstrap.build_init_command(args)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        expected = (BOOTSTRAP.parent / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(f"embedded-project {expected}", completed.stdout.strip())
 
-        self.assertEqual(command[:2], ["trellis", "init"])
-        self.assertIn("--codex", command)
-        self.assertIn("--claude", command)
-        self.assertEqual(command[command.index("--registry") + 1], args.registry)
-        self.assertEqual(command[command.index("--template") + 1], args.template)
-        self.assertEqual(command[command.index("--workflow") + 1], "native")
-        self.assertIn("--append", command)
+    def test_fresh_init_creates_model_independent_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
 
-    def test_dry_run_registry_mode_does_not_create_target(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "not-created"
-            output = StringIO()
-            with redirect_stdout(output):
-                code = bootstrap.main(
-                    [
-                        str(target),
-                        "--registry",
-                        "gh:example/embedded-agent-platform/marketplace#v1",
-                        "--discovery",
-                        "skip",
-                        "--dry-run",
-                    ]
-                )
+            code, report = project.command_init(init_args(target))
 
-            self.assertEqual(code, 0)
-            self.assertFalse(target.exists())
-            rendered = output.getvalue()
-            self.assertIn("trellis init", rendered)
-            self.assertIn("--registry", rendered)
-            self.assertNotIn("embedded_spec_installer.py", rendered)
+            self.assertEqual(0, code, report)
+            self.assertTrue(report["ok"])
+            self.assertEqual("project-init", report["operation"])
+            self.assertTrue((target / ".embedded-agent" / "manifest.json").is_file())
+            self.assertTrue(
+                (target / ".embedded-agent" / "rules" / "platform" / "index.md").is_file()
+            )
+            self.assertTrue((target / ".embedded-agent" / "knowledge").is_dir())
+            self.assertTrue((target / ".embedded-agent" / "context" / "knowledge-index.json").is_file())
+            self.assertFalse((target / ".trellis").exists())
+            self.assertNotIn("workflow", report)
+            self.assertNotIn("trellis_version", report)
 
-    def test_windows_discovery_requires_complete_identity(self):
-        args = bootstrap.parse_args(
-            ["/tmp/project", "--discovery", "windows", "--project-id", "demo"]
-        )
-        with self.assertRaisesRegex(ValueError, "provided together"):
-            bootstrap.discovery_mode(args)
+    def test_fresh_init_never_probes_or_invokes_external_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
 
-    def test_git_mode_accepts_separate_human_and_agent_workspaces(self):
-        args = bootstrap.parse_args(
-            [
-                "/tmp/project",
-                "--project-id",
-                "demo",
-                "--windows-human-workspace",
-                r"C:\Workspaces\human\demo",
-                "--windows-agent-workspace",
-                r"C:\Workspaces\agent\demo",
-                "--sync-mode",
-                "git",
-            ]
-        )
-        self.assertEqual(args.windows_workspace, r"C:\Workspaces\agent\demo")
-        self.assertEqual(bootstrap.discovery_mode(args), "windows")
+            with mock.patch.object(
+                project.subprocess,
+                "run",
+                side_effect=AssertionError("init unexpectedly invoked an external command"),
+            ):
+                code, report = project.command_init(init_args(target))
 
-    def test_workspace_manifest_records_git_commit_and_remote(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "project"
-            target.mkdir()
+            self.assertEqual(0, code, report)
+            commands = [step.get("command", []) for step in report["steps"]]
+            rendered = "\n".join(" ".join(command) for command in commands).lower()
+            self.assertNotIn("trellis", rendered)
+
+    def test_explicit_project_id_rejects_path_and_windows_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for project_id in ("..", ".", "CON", "NUL.txt", "bad/name", "项目"):
+                with self.subTest(project_id=project_id):
+                    case_root = Path(directory) / project_id.encode("utf-8").hex()
+                    case_root.mkdir()
+                    target = self.make_project(case_root)
+                    before = snapshot_tree(target)
+                    code, report = project.command_init(
+                        init_args(target, "--project-id", project_id)
+                    )
+                    self.assertEqual(2, code)
+                    self.assertFalse(report["ok"])
+                    self.assertEqual(before, snapshot_tree(target))
+
+    def test_non_ascii_directory_name_gets_stable_derived_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case_root = Path(directory) / "嵌入式项目"
+            case_root.mkdir()
+            target = self.make_project(case_root)
+            target = target.rename(case_root / "固件")
+            code, report = project.command_init(init_args(target))
+            self.assertEqual(0, code, report)
+            project_id = report["manifest"]["project_id"]
+            self.assertRegex(project_id, r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+    def test_repeated_init_is_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+
+            first_code, first_report = project.command_init(init_args(target))
+            first = snapshot_tree(target)
+            second_code, second_report = project.command_init(init_args(target))
+            second = snapshot_tree(target)
+
+            self.assertEqual(0, first_code, first_report)
+            self.assertEqual(0, second_code, second_report)
+            self.assertEqual(first, second)
+
+    def test_init_dry_run_is_zero_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            (target / "AGENTS.md").write_bytes(b"# Project Rules\r\n\r\nKeep this.  \r\n")
+            before = snapshot_tree(target)
+
+            code, report = project.command_init(init_args(target, "--dry-run"))
+
+            self.assertEqual(0, code, report)
+            self.assertEqual(before, snapshot_tree(target))
+            self.assertFalse((target / ".embedded-agent").exists())
+
+    def test_git_exclude_keeps_project_rules_and_knowledge_trackable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
             subprocess.run(["git", "init", "-q", str(target)], check=True)
-            subprocess.run(["git", "-C", str(target), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(target), "config", "user.name", "Test"], check=True)
-            (target / "README.md").write_text("demo\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(target), "add", "README.md"], check=True)
-            subprocess.run(["git", "-C", str(target), "commit", "-qm", "init"], check=True)
-            subprocess.run(["git", "-C", str(target), "remote", "add", "origin", "https://example.invalid/demo.git"], check=True)
-            args = bootstrap.parse_args([
-                str(target), "--project-id", "demo",
-                "--windows-human-workspace", r"D:\human",
-                "--windows-agent-workspace", r"D:\agent",
-            ])
-            step = bootstrap.write_workspace_manifest(target, args, False)
-            self.assertTrue(step["ok"])
-            self.assertEqual(step["manifest"]["sync_mode"], "git")
-            self.assertEqual(step["manifest"]["repositories"][0]["remote"], "https://example.invalid/demo.git")
-            self.assertTrue((target / bootstrap.WORKSPACE_MANIFEST_PATH).is_file())
-
-    def test_windows_discovery_surface_has_no_hardware_or_build_action(self):
-        args = bootstrap.parse_args(
-            [
-                "/tmp/project",
-                "--discovery",
-                "windows",
-                "--project-id",
-                "demo",
-                "--windows-workspace",
-                r"D:\work\demo",
-                "--embedded-agent-command",
-                "/opt/bin/embedded-agent",
-                "--build-knowledge",
-            ]
-        )
-
-        commands = bootstrap.windows_commands(args)
-        flattened = "\n".join(" ".join(command) for _, command in commands)
-        top_level_actions = {command[1] for _, command in commands}
-
-        self.assertIn("project discover", flattened)
-        self.assertIn("knowledge build", flattened)
-        self.assertTrue(top_level_actions.isdisjoint({"build", "flash", "rtt", "log"}))
-
-    def test_windows_discovery_forwards_explicit_keil_selection(self):
-        args = bootstrap.parse_args(
-            [
-                "/tmp/project",
-                "--discovery",
-                "windows",
-                "--project-id",
-                "demo",
-                "--windows-workspace",
-                r"D:\work\demo",
-                "--embedded-agent-command",
-                "/opt/bin/embedded-agent",
-                "--keil-project",
-                "firmware/product.uvprojx",
-            ]
-        )
-
-        discovery = dict(bootstrap.windows_commands(args))["windows-project-discovery"]
-
-        self.assertIn("--keil-project", discovery)
-        self.assertEqual(discovery[discovery.index("--keil-project") + 1], "firmware/product.uvprojx")
-
-    def test_version_parser_uses_final_semver(self):
-        output = "update available: 0.6.5 -> 0.6.6\n0.6.6\n"
-        self.assertEqual(bootstrap.extract_version(output), (0, 6, 6))
-
-    def test_zero_exit_with_error_text_is_rejected(self):
-        step = {
-            "exit_code": 0,
-            "ok": True,
-            "stdout": "setup output\nError: Registry has no index.json.",
-            "stderr": "",
-        }
-        self.assertEqual(
-            bootstrap.command_reported_error(step),
-            "Error: Registry has no index.json.",
-        )
-
-    def test_local_projection_is_added_to_git_info_exclude(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp) / "project"
-            target.mkdir()
-            subprocess.run(
-                ["git", "init", "-q", str(target)],
-                check=True,
-                stdout=subprocess.DEVNULL,
+            args = project.parse_args(
+                ["init", str(target), "--discovery", "skip"]
             )
 
-            result = bootstrap.configure_local_git_exclude(target, dry_run=False)
-            repeated = bootstrap.configure_local_git_exclude(target, dry_run=False)
-            exclude = Path(result["exclude_path"]).read_text(encoding="utf-8")
+            code, report = project.command_init(args)
 
-            self.assertTrue(result["ok"])
-            self.assertTrue(result["changed"])
-            self.assertFalse(repeated["changed"])
-            for entry in bootstrap.LOCAL_PROJECTION_PATHS:
-                self.assertIn(entry, exclude)
+            self.assertEqual(0, code, report)
+            exclude_path = Path(
+                next(
+                    step["exclude_path"]
+                    for step in report["steps"]
+                    if step["name"] == "local-git-exclude"
+                )
+            )
+            excluded = exclude_path.read_text(encoding="utf-8")
+            for expected in project.LOCAL_PROJECTION_PATHS:
+                self.assertIn(expected, excluded)
+            self.assertNotIn(".embedded-agent/rules/project/", excluded)
+            self.assertNotIn(".embedded-agent/knowledge/", excluded)
 
-    def test_project_agents_block_preserves_trellis_and_project_content(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp)
+    def test_existing_crlf_agents_content_is_preserved_byte_for_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
             original = (
-                "<!-- TRELLIS:START -->\n"
-                "managed by Trellis\n"
-                "<!-- TRELLIS:END -->\n\n"
-                "## Project Rules\n\nKeep this text.\n"
+                b"<!-- TRELLIS:START -->\r\n"
+                b"legacy instructions\r\n"
+                b"<!-- TRELLIS:END -->\r\n\r\n"
+                b"# Project Rules\r\n\r\nKeep this.  \r\n"
             )
-            (target / "AGENTS.md").write_text(original, encoding="utf-8")
+            (target / "AGENTS.md").write_bytes(original)
 
-            first = bootstrap.install_project_agents(target, dry_run=False)
-            second = bootstrap.install_project_agents(target, dry_run=False)
-            rendered = (target / "AGENTS.md").read_text(encoding="utf-8")
+            code, report = project.command_init(init_args(target))
 
-            self.assertTrue(first["changed"])
-            self.assertFalse(second["changed"])
-            self.assertIn("<!-- TRELLIS:START -->", rendered)
-            self.assertIn("Keep this text.", rendered)
-            self.assertEqual(rendered.count(bootstrap.PROJECT_AGENTS_START), 1)
-            self.assertEqual(rendered.count(bootstrap.PROJECT_AGENTS_END), 1)
+            self.assertEqual(0, code, report)
+            rendered = (target / "AGENTS.md").read_bytes()
+            self.assertTrue(rendered.startswith(original))
+            self.assertIn(project.PROJECT_AGENTS_START.encode(), rendered)
+            self.assertEqual(1, rendered.count(project.PROJECT_AGENTS_START.encode()))
+            self.assertEqual(1, rendered.count(project.PROJECT_AGENTS_END.encode()))
 
-    def test_project_agents_block_is_replaced_in_place(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp)
+    def test_managed_agents_replacement_preserves_prefix_and_suffix_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            prefix = b"# Project Prefix\r\n\r\n"
+            suffix = b"\r\n\r\nProject suffix.  \r\n"
             old = (
-                "Project preface.\n\n"
-                f"{bootstrap.PROJECT_AGENTS_START}\nold platform rules\n"
-                f"{bootstrap.PROJECT_AGENTS_END}\n\nProject suffix.\n"
+                prefix
+                + project.PROJECT_AGENTS_START.encode()
+                + b"\r\nold platform rules\r\n"
+                + project.PROJECT_AGENTS_END.encode()
+                + suffix
             )
-            (target / "AGENTS.md").write_text(old, encoding="utf-8")
+            (target / "AGENTS.md").write_bytes(old)
 
-            result = bootstrap.install_project_agents(target, dry_run=False)
-            rendered = (target / "AGENTS.md").read_text(encoding="utf-8")
+            code, report = project.command_init(init_args(target))
 
-            self.assertTrue(result["ok"])
-            self.assertNotIn("old platform rules", rendered)
-            self.assertIn("Project preface.", rendered)
-            self.assertIn("Project suffix.", rendered)
-            self.assertEqual(rendered.count(bootstrap.PROJECT_AGENTS_START), 1)
+            self.assertEqual(0, code, report)
+            rendered = (target / "AGENTS.md").read_bytes()
+            self.assertTrue(rendered.startswith(prefix))
+            self.assertTrue(rendered.endswith(suffix))
+            self.assertNotIn(b"old platform rules", rendered)
 
-    def test_legacy_project_agents_block_is_migrated_without_duplication(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp)
-            old = (
-                "Project preface.\n\n"
-                f"{bootstrap.LEGACY_PROJECT_AGENTS_START}\nlegacy rules\n"
-                f"{bootstrap.LEGACY_PROJECT_AGENTS_END}\n\nProject suffix.\n"
+    def test_malformed_agents_fails_before_projection_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            malformed = project.PROJECT_AGENTS_START.encode() + b"\nunfinished\n"
+            (target / "AGENTS.md").write_bytes(malformed)
+            before = snapshot_tree(target)
+
+            code, report = project.command_init(init_args(target))
+
+            self.assertEqual(2, code)
+            self.assertFalse(report["ok"])
+            self.assertEqual(before, snapshot_tree(target))
+            self.assertFalse((target / ".embedded-agent").exists())
+
+    def test_atomic_file_failure_preserves_existing_bytes_and_cleans_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "manifest.json"
+            destination.write_bytes(b"old\n")
+
+            with mock.patch.object(project.os, "replace", side_effect=OSError("injected")):
+                with self.assertRaisesRegex(OSError, "injected"):
+                    project.atomic_write_bytes(destination, b"new\n")
+
+            self.assertEqual(b"old\n", destination.read_bytes())
+            self.assertEqual([], list(destination.parent.glob(".manifest.json.*")))
+
+    def test_windows_init_uses_discovery_only_runtime_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            args = project.parse_args(
+                [
+                    "init",
+                    str(target),
+                    "--discovery",
+                    "windows",
+                    "--project-id",
+                    "demo",
+                    "--windows-agent-workspace",
+                    r"D:\work\demo",
+                    "--build-knowledge",
+                    "--dry-run",
+                    "--no-git-exclude",
+                ]
             )
-            (target / "AGENTS.md").write_text(old, encoding="utf-8")
+            commands: list[list[str]] = []
 
-            result = bootstrap.install_project_agents(target, dry_run=False)
-            rendered = (target / "AGENTS.md").read_text(encoding="utf-8")
+            def fake_step(name, command, cwd, dry_run, quiet):
+                commands.append(command)
+                return {
+                    "name": name,
+                    "command": command,
+                    "cwd": str(cwd),
+                    "dry_run": dry_run,
+                    "ok": True,
+                    "exit_code": 0,
+                }
 
-            self.assertTrue(result["ok"])
-            self.assertNotIn("legacy rules", rendered)
-            self.assertNotIn(bootstrap.LEGACY_PROJECT_AGENTS_START, rendered)
-            self.assertIn("Project preface.", rendered)
-            self.assertIn("Project suffix.", rendered)
-            self.assertEqual(rendered.count(bootstrap.PROJECT_AGENTS_START), 1)
+            with mock.patch.object(project, "run_step", side_effect=fake_step):
+                code, report = project.command_init(args)
 
-    def test_project_agents_rejects_malformed_existing_markers(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp)
-            original = f"{bootstrap.PROJECT_AGENTS_START}\nunfinished\n"
-            (target / "AGENTS.md").write_text(original, encoding="utf-8")
-
-            result = bootstrap.install_project_agents(target, dry_run=False)
-
-            self.assertFalse(result["ok"])
-            self.assertEqual((target / "AGENTS.md").read_text(encoding="utf-8"), original)
-
-    def test_project_agents_rejects_reversed_existing_markers(self):
-        with tempfile.TemporaryDirectory() as temp:
-            target = Path(temp)
-            original = (
-                f"{bootstrap.PROJECT_AGENTS_END}\nbody\n"
-                f"{bootstrap.PROJECT_AGENTS_START}\n"
+            self.assertEqual(0, code, report)
+            self.assertEqual(
+                ["status", "project", "knowledge"],
+                [command[1] for command in commands],
             )
-            (target / "AGENTS.md").write_text(original, encoding="utf-8")
+            self.assertIn("discover", commands[1])
+            self.assertIn("build", commands[2])
+            rendered = "\n".join(" ".join(command) for command in commands).lower()
+            for forbidden in (" flash ", " reset ", " rtt ", " device ", " can ", " adb "):
+                self.assertNotIn(forbidden, f" {rendered} ")
+            self.assertNotIn("trellis", rendered)
 
-            result = bootstrap.install_project_agents(target, dry_run=False)
+    def test_windows_json_step_requires_complete_matching_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            cases = (
+                ("", "empty stdout"),
+                ("[]", "did not return an object"),
+                ("{}", "incomplete Capability Contract"),
+            )
+            for output, expected in cases:
+                with self.subTest(output=output):
+                    script = f"print({output!r})" if output else "pass"
+                    step = project.run_step(
+                        "windows-agent-status",
+                        [sys.executable, "-c", script, "--json"],
+                        cwd,
+                        False,
+                        True,
+                    )
+                    self.assertFalse(step["ok"])
+                    self.assertIn(expected, step["first_failure"])
 
-            self.assertFalse(result["ok"])
-            self.assertEqual((target / "AGENTS.md").read_text(encoding="utf-8"), original)
+    def test_doctor_validates_initialized_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            code, init_report = project.command_init(init_args(target))
+            self.assertEqual(0, code, init_report)
+
+            doctor_args = project.parse_args(["doctor", str(target)])
+            doctor_code, report = project.command_doctor(doctor_args)
+
+            self.assertEqual(0, doctor_code, report)
+            self.assertTrue(report["ok"])
+            self.assertTrue(all(check["ok"] for check in report["checks"]))
+
+    def test_doctor_detects_modified_platform_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            code, init_report = project.command_init(init_args(target))
+            self.assertEqual(0, code, init_report)
+            rule = target / ".embedded-agent" / "rules" / "platform" / "index.md"
+            rule.write_text("# Modified outside the bundle\n", encoding="utf-8")
+
+            doctor_code, report = project.command_doctor(
+                project.parse_args(["doctor", str(target)])
+            )
+
+            self.assertEqual(2, doctor_code)
+            self.assertFalse(report["ok"])
+            integrity = next(
+                check for check in report["checks"]
+                if check["name"] == "rule-bundle-integrity"
+            )
+            self.assertFalse(integrity["ok"])
+            self.assertTrue(integrity["drift"])
+
+    def test_refresh_is_byte_identical_after_first_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_project(Path(directory))
+            code, init_report = project.command_init(init_args(target))
+            self.assertEqual(0, code, init_report)
+            args = project.parse_args(
+                [
+                    "refresh",
+                    str(target),
+                    "--discovery",
+                    "skip",
+                    "--no-git-exclude",
+                ]
+            )
+
+            with mock.patch.object(project, "git_command", return_value=""):
+                first_code, first_report = project.command_refresh(args)
+                first = snapshot_tree(target)
+                second_code, second_report = project.command_refresh(args)
+                second = snapshot_tree(target)
+
+            self.assertEqual(0, first_code, first_report)
+            self.assertEqual(0, second_code, second_report)
+            self.assertEqual(first, second)
+
+    def test_cli_exposes_project_lifecycle_subcommands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = str(Path(directory))
+            cases = {
+                "init": project.command_init,
+                "refresh": project.command_refresh,
+                "doctor": project.command_doctor,
+                "migrate-trellis": project.command_migrate_trellis,
+            }
+            for name, function in cases.items():
+                with self.subTest(command=name):
+                    args = project.parse_args([name, target])
+                    self.assertIs(function, args.func)
+
+    def test_executable_shim_targets_embedded_project_module(self) -> None:
+        source = (BOOTSTRAP / "embedded-project").read_text(encoding="utf-8")
+
+        self.assertIn("embedded_project.py", source)
+        self.assertNotIn("trellis_embedded_init.py", source)
 
 
-class SpecFallbackTests(unittest.TestCase):
-    def test_conflicts_become_candidates_and_runtime_state_is_untouched(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            template = root / "template"
-            target = root / "target"
-            (template / "nested").mkdir(parents=True)
-            (template / "index.md").write_text("new index\n", encoding="utf-8")
-            (template / "nested" / "rule.md").write_text("rule\n", encoding="utf-8")
+class TrellisMigrationTests(unittest.TestCase):
+    def make_legacy_project(self, root: Path) -> Path:
+        target = root / "project"
+        (target / ".trellis" / "spec" / "project").mkdir(parents=True)
+        (target / ".trellis" / "knowledge" / "project" / "runbooks").mkdir(parents=True)
+        (target / ".trellis" / "tasks").mkdir(parents=True)
+        (target / ".trellis" / "agents").mkdir(parents=True)
+        (target / "README.md").write_bytes(b"# Legacy project\n")
+        (target / ".trellis" / "spec" / "project" / "project-profile.json").write_bytes(
+            b'{"architecture":"mcu-only"}\n'
+        )
+        (target / ".trellis" / "spec" / "project-rule.md").write_bytes(
+            b"# Project-specific legacy rule\n"
+        )
+        (target / ".trellis" / "spec" / "index.md").write_bytes(
+            b"# Legacy platform rule index\n"
+        )
+        (target / ".trellis" / "knowledge" / "project" / "runbooks" / "debug.md").write_bytes(
+            b"# Debug knowledge\n"
+        )
+        (target / ".trellis" / "workflow.md").write_bytes(b"legacy workflow\n")
+        (target / ".trellis" / "tasks" / "task.md").write_bytes(b"legacy task\n")
+        (target / ".trellis" / "agents" / "agent.md").write_bytes(b"legacy agent\n")
+        return target
 
-            spec = target / ".trellis" / "spec"
-            knowledge = target / ".trellis" / "knowledge"
-            agents = target / ".trellis" / "agents"
-            spec.mkdir(parents=True)
+    def migrate_args(self, target: Path, *extra: str):
+        return project.parse_args(
+            ["migrate-trellis", str(target), "--no-git-exclude", *extra]
+        )
+
+    def test_explicit_migration_maps_content_and_preserves_legacy_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_legacy_project(Path(directory))
+            legacy_before = snapshot_tree(target / ".trellis")
+
+            with mock.patch.object(
+                project.subprocess,
+                "run",
+                side_effect=AssertionError("migration must not invoke Trellis"),
+            ):
+                code, report = project.command_migrate_trellis(self.migrate_args(target))
+
+            self.assertEqual(0, code, report)
+            self.assertTrue(report["ok"])
+            self.assertEqual(legacy_before, snapshot_tree(target / ".trellis"))
+            self.assertEqual(
+                b'{"architecture":"mcu-only"}\n',
+                (target / ".embedded-agent" / "context" / "project-profile.json").read_bytes(),
+            )
+            self.assertEqual(
+                b"# Debug knowledge\n",
+                (
+                    target
+                    / ".embedded-agent"
+                    / "knowledge"
+                    / "project"
+                    / "runbooks"
+                    / "debug.md"
+                ).read_bytes(),
+            )
+            self.assertEqual(
+                b"# Project-specific legacy rule\n",
+                (
+                    target
+                    / ".embedded-agent"
+                    / "rules"
+                    / "project"
+                    / "project-rule.md"
+                ).read_bytes(),
+            )
+            self.assertEqual(
+                b"# Legacy platform rule index\n",
+                (
+                    target
+                    / ".embedded-agent"
+                    / "knowledge"
+                    / "legacy-trellis-spec"
+                    / "index.md"
+                ).read_bytes(),
+            )
+            self.assertFalse(
+                (target / ".embedded-agent" / "rules" / "project" / "index.md").exists()
+            )
+            migration = json.loads(
+                (target / ".embedded-agent" / "context" / "trellis-migration.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(migration["source_preserved"])
+            self.assertTrue(migration["legacy_only"]["workflow"])
+            self.assertTrue(migration["legacy_only"]["tasks"])
+            self.assertTrue(migration["legacy_only"]["agents"])
+
+    def test_migration_is_byte_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_legacy_project(Path(directory))
+
+            first_code, first_report = project.command_migrate_trellis(self.migrate_args(target))
+            first = snapshot_tree(target)
+            second_code, second_report = project.command_migrate_trellis(self.migrate_args(target))
+            second = snapshot_tree(target)
+
+            self.assertEqual(0, first_code, first_report)
+            self.assertEqual(0, second_code, second_report)
+            self.assertEqual(first, second)
+
+    def test_migration_dry_run_is_zero_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_legacy_project(Path(directory))
+            before = snapshot_tree(target)
+
+            code, report = project.command_migrate_trellis(
+                self.migrate_args(target, "--dry-run")
+            )
+
+            self.assertEqual(0, code, report)
+            self.assertEqual(before, snapshot_tree(target))
+            self.assertFalse((target / ".embedded-agent").exists())
+
+    def test_migration_conflict_creates_candidate_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_legacy_project(Path(directory))
+            destination = target / ".embedded-agent" / "context" / "project-profile.json"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"new platform profile\n")
+
+            code, report = project.command_migrate_trellis(self.migrate_args(target))
+
+            self.assertEqual(0, code, report)
+            self.assertEqual(b"new platform profile\n", destination.read_bytes())
+            self.assertEqual(
+                b'{"architecture":"mcu-only"}\n',
+                destination.with_name("project-profile.json.trellis.new").read_bytes(),
+            )
+
+    def test_different_existing_candidate_fails_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.make_legacy_project(Path(directory))
+            destination = target / ".embedded-agent" / "context" / "project-profile.json"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"new platform profile\n")
+            destination.with_name("project-profile.json.trellis.new").write_bytes(
+                b"reviewed candidate\n"
+            )
+            before = snapshot_tree(target)
+
+            code, report = project.command_migrate_trellis(self.migrate_args(target))
+
+            self.assertEqual(2, code)
+            self.assertFalse(report["ok"])
+            self.assertEqual(before, snapshot_tree(target))
+
+    def test_migration_rejects_nested_destination_symlink_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = self.make_legacy_project(root)
+            outside = root / "outside"
+            outside.mkdir()
+            knowledge = target / ".embedded-agent" / "knowledge"
             knowledge.mkdir(parents=True)
-            agents.mkdir(parents=True)
-            (spec / "index.md").write_text("project index\n", encoding="utf-8")
-            (knowledge / "keep.md").write_text("knowledge\n", encoding="utf-8")
-            (agents / "keep.py").write_text("runtime\n", encoding="utf-8")
-            workflow = target / ".trellis" / "workflow.md"
-            workflow.write_text("native plus local changes\n", encoding="utf-8")
+            try:
+                (knowledge / "project").symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
 
-            result = fallback.install_spec(
-                template,
-                target,
-                fallback.PRESET_NAME,
-                overwrite=False,
-                dry_run=False,
-            )
+            code, report = project.command_migrate_trellis(self.migrate_args(target))
 
-            candidate = spec / "index.md.embedded-dual-machine.new"
-            self.assertTrue(candidate.is_file())
-            self.assertEqual((spec / "index.md").read_text(), "project index\n")
-            self.assertTrue((spec / "nested" / "rule.md").is_file())
-            self.assertEqual((knowledge / "keep.md").read_text(), "knowledge\n")
-            self.assertEqual((agents / "keep.py").read_text(), "runtime\n")
-            self.assertEqual(workflow.read_text(), "native plus local changes\n")
-            self.assertEqual(len(result.candidates), 1)
-            self.assertEqual(len(result.created), 1)
-
-    def test_marketplace_index_resolves_to_spec_only(self):
-        repo = SCRIPTS.parent
-        index_path = repo / "marketplace" / "index.json"
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-        entry = index["templates"][0]
-        template = repo / entry["path"]
-
-        self.assertEqual(entry["type"], "spec")
-        self.assertEqual(entry["id"], bootstrap.DEFAULT_TEMPLATE)
-        self.assertTrue((template / "index.md").is_file())
-        self.assertFalse((template / ".trellis" / "agents").exists())
-        self.assertFalse((template / ".trellis" / "knowledge").exists())
+            self.assertEqual(2, code)
+            self.assertFalse(report["ok"])
+            self.assertEqual({}, snapshot_tree(outside))
+            self.assertFalse((target / ".embedded-agent" / "manifest.json").exists())
 
 
 if __name__ == "__main__":

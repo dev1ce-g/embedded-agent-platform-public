@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Discover embedded project facts and build Trellis project profiles.
+"""Discover embedded project facts and build model-independent profiles.
 
 The scanner is intentionally parser-first and read-only. It never builds,
-flashes, debugs, or tails logs; it only records evidence that future agents can
-use under the normal Trellis task and agent-governance gates.
+flashes, debugs, or tails logs; it only records evidence for future agents.
 """
 
 from __future__ import annotations
@@ -11,8 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,8 @@ IGNORE_DIRS = {
     "build",
     "dist",
     "out",
+    ".embedded-agent",
+    ".trellis",
 }
 KNOWN_LAYERS = (
     "business",
@@ -58,6 +61,7 @@ FLASH_KEYWORDS = ("flash", "jlink", "burn", "program")
 LOG_KEYWORDS = ("log-tail", "serial", "uart", "adb", "can")
 HARDFAULT_KEYWORDS = ("hardfault", "fault", "addr2line", "callstack", "map")
 POWER_KEYWORDS = ("pmu", "power", "low_power", "sleep", "wake")
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 
 @dataclass
@@ -71,10 +75,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument(
-        "--trellis-dir",
+        "--output-dir",
         type=Path,
         default=None,
-        help="Defaults to <root>/.trellis after root resolution.",
+        help="Defaults to <root>/.embedded-agent/context after root resolution.",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json-summary", action="store_true")
@@ -86,7 +90,7 @@ def resolve_root(start: Path) -> Path:
     if current.is_file():
         current = current.parent
     for candidate in [current, *current.parents]:
-        if (candidate / ".trellis").is_dir():
+        if (candidate / ".embedded-agent").is_dir():
             return candidate
     return current
 
@@ -102,19 +106,42 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def is_symlink_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def is_contained_entry(path: Path, root: Path, *, directory: bool) -> bool:
+    if is_symlink_or_reparse(path):
+        return False
+    try:
+        info = path.lstat()
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+
 def walk_files(root: Path) -> list[Path]:
+    safe_root = root.resolve(strict=True)
     files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(safe_root):
         base = Path(dirpath)
         dirnames[:] = [
             d for d in dirnames
-            if d not in IGNORE_DIRS and not d.startswith(".backup-")
+            if d not in IGNORE_DIRS
+            and not d.startswith(".backup-")
+            and is_contained_entry(base / d, safe_root, directory=True)
         ]
-        if ".trellis" in base.parts and ".backup-" in base.name:
-            dirnames[:] = []
-            continue
         for name in filenames:
-            files.append(base / name)
+            path = base / name
+            if is_contained_entry(path, safe_root, directory=False):
+                files.append(path)
     return sorted(files, key=lambda p: p.as_posix())
 
 
@@ -153,6 +180,12 @@ def discover_git_repos(state: ScanState) -> list[dict[str, Any]]:
     repos: list[dict[str, Any]] = []
     for dirpath, dirnames, _ in os.walk(state.root):
         base = Path(dirpath)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in IGNORE_DIRS - {".git"}
+            and not d.startswith(".backup-")
+            and is_contained_entry(base / d, state.root, directory=True)
+        ]
         if ".git" in dirnames:
             branch = run_git(base, ["rev-parse", "--abbrev-ref", "HEAD"])
             commit = run_git(base, ["rev-parse", "--short", "HEAD"])
@@ -165,10 +198,7 @@ def discover_git_repos(state: ScanState) -> list[dict[str, Any]]:
             })
             add_evidence(state, "git_repo", base / ".git", "nested Git repository")
             dirnames[:] = [d for d in dirnames if d != ".git"]
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in IGNORE_DIRS and not d.startswith(".backup-")
-        ]
+        dirnames[:] = [d for d in dirnames if d != ".git"]
     return sorted(repos, key=lambda item: item["path"])
 
 
@@ -211,8 +241,8 @@ def discover_manifests(state: ScanState, files: list[Path]) -> list[dict[str, An
 
 
 def classify_architecture(root: Path, manifests: list[dict[str, Any]]) -> str:
-    has_mcu = (root / "mcu").is_dir()
-    has_mpu = (root / "mpu").is_dir()
+    has_mcu = is_contained_entry(root / "mcu", root, directory=True)
+    has_mpu = is_contained_entry(root / "mpu", root, directory=True)
     joined = json.dumps(manifests, ensure_ascii=False).lower()
     if has_mcu and has_mpu:
         return "mcu-mpu"
@@ -228,15 +258,23 @@ def classify_architecture(root: Path, manifests: list[dict[str, Any]]) -> str:
 def discover_packages(state: ScanState) -> list[dict[str, Any]]:
     packages: list[dict[str, Any]] = []
     for child in sorted(state.root.iterdir()):
-        if not child.is_dir() or child.name.startswith("."):
+        if child.name.startswith(".") or not is_contained_entry(child, state.root, directory=True):
             continue
-        layer_dirs = [name for name in KNOWN_LAYERS if (child / name).is_dir()]
-        if (child / ".git").exists() or layer_dirs or child.name in {"mcu", "mpu"}:
+        layer_dirs = [
+            name for name in KNOWN_LAYERS
+            if is_contained_entry(child / name, state.root, directory=True)
+        ]
+        git_marker = child / ".git"
+        has_git = (
+            is_contained_entry(git_marker, state.root, directory=True)
+            or is_contained_entry(git_marker, state.root, directory=False)
+        )
+        if has_git or layer_dirs or child.name in {"mcu", "mpu"}:
             packages.append({
                 "name": child.name,
                 "path": rel(child, state.root),
                 "layers": layer_dirs,
-                "git": (child / ".git").exists(),
+                "git": has_git,
             })
             add_evidence(
                 state,
@@ -256,7 +294,8 @@ def discover_modules(state: ScanState, packages: list[dict[str, Any]]) -> list[d
             layer_path = pkg_path / layer
             children = [
                 p.name for p in sorted(layer_path.iterdir())
-                if p.is_dir() and not p.name.startswith(".")
+                if not p.name.startswith(".")
+                and is_contained_entry(p, state.root, directory=True)
             ][:40]
             modules.append({
                 "package": package["name"],
@@ -297,7 +336,7 @@ def parse_keil(path: Path, root: Path) -> dict[str, Any]:
     else:
         result["output_kind"] = "unknown"
     user_options = path.with_suffix(".uvoptx")
-    if user_options.is_file():
+    if is_contained_entry(user_options, root, directory=False):
         try:
             options_root = ET.parse(user_options).getroot()
             monitor = options_root.find(".//pMon")
@@ -354,25 +393,6 @@ def discover_scripts(state: ScanState, files: list[Path]) -> dict[str, list[dict
             groups[target].append({"path": rel(path, state.root)})
             add_evidence(state, f"{target}_script", path, f"{target} wrapper signal")
     return groups
-
-
-def discover_trellis(state: ScanState) -> dict[str, Any]:
-    trellis = state.root / ".trellis"
-    spec_files = sorted((trellis / "spec").rglob("*.md")) if (trellis / "spec").is_dir() else []
-    knowledge_files = (
-        sorted((trellis / "knowledge").rglob("*.md"))
-        if (trellis / "knowledge").is_dir()
-        else []
-    )
-    agent_files = sorted((trellis / "agents").rglob("*.md")) if (trellis / "agents").is_dir() else []
-    return {
-        "spec_count": len(spec_files),
-        "knowledge_count": len(knowledge_files),
-        "agent_count": len(agent_files),
-        "spec_indexes": [rel(p, state.root) for p in spec_files if p.name == "index.md"],
-        "knowledge_indexes": [rel(p, state.root) for p in knowledge_files if p.name == "index.md"],
-        "agents": [rel(p, state.root) for p in agent_files],
-    }
 
 
 def capability(
@@ -470,7 +490,6 @@ def build_profiles(state: ScanState, files: list[Path]) -> dict[str, Any]:
     scripts = discover_scripts(state, files)
     architecture = classify_architecture(state.root, manifests)
     capabilities = infer_capabilities(state, build_files, scripts, files)
-    trellis = discover_trellis(state)
     chips = sorted({
         item.get("device", "").split(":", 1)[0]
         for item in keil_projects
@@ -489,7 +508,6 @@ def build_profiles(state: ScanState, files: list[Path]) -> dict[str, Any]:
         "build_files": build_files,
         "keil_projects": keil_projects,
         "scripts": scripts,
-        "trellis": trellis,
         "evidence": state.evidence,
     }
     project_profile = {
@@ -505,7 +523,6 @@ def build_profiles(state: ScanState, files: list[Path]) -> dict[str, Any]:
             for item in manifests
         ],
         "build_systems": build_files,
-        "trellis": trellis,
     }
     device_profile = {
         "schema_version": SCHEMA_VERSION,
@@ -526,7 +543,7 @@ def build_profiles(state: ScanState, files: list[Path]) -> dict[str, Any]:
         "capabilities": capabilities,
         "rules": [
             "Detected capability is not execution approval.",
-            "Build/flash/debug still require a Trellis task, allowed paths, command wrapper and evidence contract.",
+            "Build/flash/debug still require explicit authority, allowed paths, a fixed command and an evidence contract.",
         ],
     }
     return {
@@ -553,7 +570,7 @@ def render_overview(profiles: dict[str, Any]) -> str:
     cap_rows = [[c["name"], c["status"], c["confidence"]] for c in caps]
     return f"""# Project Overview
 
-Generated by `.trellis/scripts/project_discovery.py`.
+Generated by the Embedded Agent Platform project discovery tool.
 
 - Architecture: `{project["architecture"]}`
 - Repositories: {len(project["repos"])}
@@ -569,8 +586,8 @@ Generated by `.trellis/scripts/project_discovery.py`.
 ## Agent Rule
 
 This file is discovery output. Treat it as evidence, not authorization. Any
-build, flash, debug or hardware-adjacent action still needs a Trellis task,
-job packet and the approval gates in `.trellis/spec/agent-governance.md`.
+build, flash, debug or hardware-adjacent action still needs explicit authority
+and the gates in `.embedded-agent/rules/platform/agent-governance.md`.
 """
 
 
@@ -602,8 +619,8 @@ This generated guide only lists build evidence. It does not execute commands.
 
 ## Use In Tasks
 
-Before running any build, create or activate a Trellis task and record the exact
-wrapper command, exit code, log path and artifact evidence in the task files.
+Before running any build, record the exact objective, authority, wrapper
+command, exit code, log path and artifact evidence in the current task context.
 """
 
 
@@ -640,36 +657,95 @@ move from `partial` to repeatable wrapper-backed operation.
 """
 
 
-def output_files(trellis_dir: Path, profiles: dict[str, Any]) -> dict[Path, str]:
-    spec_project = trellis_dir / "spec" / "project"
-    knowledge_project = trellis_dir / "knowledge" / "project"
+def output_files(context_dir: Path, profiles: dict[str, Any]) -> dict[Path, str]:
     overview = render_overview(profiles)
     module_map = render_module_map(profiles)
     build_guide = render_build_guide(profiles)
     architecture = render_architecture(profiles)
     return {
-        spec_project / "discovery-facts.json": json.dumps(profiles["facts"], indent=2, ensure_ascii=False),
-        spec_project / "project-profile.json": json.dumps(profiles["project_profile"], indent=2, ensure_ascii=False),
-        spec_project / "device-profile.json": json.dumps(profiles["device_profile"], indent=2, ensure_ascii=False),
-        spec_project / "capability-profile.json": json.dumps(profiles["capability_profile"], indent=2, ensure_ascii=False),
-        spec_project / "overview.md": overview,
-        spec_project / "architecture.md": architecture,
-        spec_project / "module-map.md": module_map,
-        spec_project / "build-guide.md": build_guide,
-        knowledge_project / "overview.md": overview,
-        knowledge_project / "module-map.md": module_map,
-        knowledge_project / "build-guide.md": build_guide,
-        knowledge_project / "runbooks" / "index.md": render_runbooks(profiles),
+        context_dir / "discovery-facts.json": json.dumps(profiles["facts"], indent=2, ensure_ascii=False),
+        context_dir / "project-profile.json": json.dumps(profiles["project_profile"], indent=2, ensure_ascii=False),
+        context_dir / "device-profile.json": json.dumps(profiles["device_profile"], indent=2, ensure_ascii=False),
+        context_dir / "capability-profile.json": json.dumps(profiles["capability_profile"], indent=2, ensure_ascii=False),
+        context_dir / "overview.md": overview,
+        context_dir / "architecture.md": architecture,
+        context_dir / "module-map.md": module_map,
+        context_dir / "build-guide.md": build_guide,
+        context_dir / "runbooks" / "index.md": render_runbooks(profiles),
     }
 
 
-def write_outputs(files: dict[Path, str], dry_run: bool) -> None:
+def without_generated_at(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: without_generated_at(item)
+            for key, item in value.items()
+            if key != "generated_at"
+        }
+    if isinstance(value, list):
+        return [without_generated_at(item) for item in value]
+    return value
+
+
+def retain_generation_time(context_dir: Path, profiles: dict[str, Any]) -> None:
+    previous_path = context_dir / "discovery-facts.json"
+    if not previous_path.is_file():
+        return
+    try:
+        previous = json.loads(previous_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if without_generated_at(previous) != without_generated_at(profiles["facts"]):
+        return
+    generated_at = previous.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        return
+    for profile in profiles.values():
+        if isinstance(profile, dict) and "generated_at" in profile:
+            profile["generated_at"] = generated_at
+
+
+def validate_output_path(root: Path, path: Path) -> None:
+    safe_root = root.resolve()
+    absolute = Path(os.path.abspath(path))
+    try:
+        relative = absolute.relative_to(safe_root)
+    except ValueError as error:
+        raise ValueError(f"discovery output escapes its allowed root: {path}") from error
+    current = safe_root
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"refusing to write discovery output through symlink: {current}")
+        if current.exists():
+            is_final = index == len(relative.parts) - 1
+            if is_final and not current.is_file():
+                raise ValueError(f"discovery output is not a regular file: {current}")
+            if not is_final and not current.is_dir():
+                raise ValueError(f"discovery output parent is not a directory: {current}")
+
+
+def write_outputs(files: dict[Path, str], dry_run: bool, root: Path) -> None:
+    # Validate the complete output set before making the first write.
+    for path in files:
+        validate_output_path(root, path)
     for path, content in files.items():
         if dry_run:
             print(f"would write {path}")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        validate_output_path(root, path)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content.rstrip() + "\n")
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
 
 
 def summary(profiles: dict[str, Any], outputs: dict[Path, str]) -> dict[str, Any]:
@@ -692,16 +768,29 @@ def summary(profiles: dict[str, Any], outputs: dict[Path, str]) -> dict[str, Any
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     root = resolve_root(args.root)
-    trellis_dir = (args.trellis_dir or root / ".trellis").resolve()
-    if not trellis_dir.is_dir():
-        print(f"error: Trellis directory not found: {trellis_dir}", file=sys.stderr)
+    requested_context = args.output_dir or root / ".embedded-agent" / "context"
+    context_dir = Path(os.path.abspath(requested_context))
+    output_root = root if args.output_dir is None else context_dir.parent.resolve()
+    try:
+        validate_output_path(output_root, context_dir / ".output-check")
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if context_dir.exists() and (not context_dir.is_dir() or context_dir.is_symlink()):
+        print(f"error: discovery output is not a regular directory: {context_dir}", file=sys.stderr)
         return 2
 
     state = ScanState(root=root, generated_at=now_iso())
     files = walk_files(root)
     profiles = build_profiles(state, files)
-    outputs = output_files(trellis_dir, profiles)
-    write_outputs(outputs, args.dry_run)
+    try:
+        validate_output_path(output_root, context_dir / "discovery-facts.json")
+        retain_generation_time(context_dir, profiles)
+        outputs = output_files(context_dir, profiles)
+        write_outputs(outputs, args.dry_run, output_root)
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
     data = summary(profiles, outputs)
     if args.json_summary:

@@ -5,10 +5,12 @@ __pycache__/
 .coverage
 htmlcov/
 runtime/windows/logs/
-runtime/windows/sessions/
 runtime/windows/**/site-packages*/
 runtime/windows/**/wheelhouse*/
 runtime/windows/**/backups/
+runtime/windows/aboot-connections.json
+runtime/windows/can-drivers.json
+runtime/windows/jenkins-connections.json
 *.log
 *.tmp
 *.new

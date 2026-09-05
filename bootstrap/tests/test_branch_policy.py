@@ -8,15 +8,22 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "trellis_branch.py"
-SPEC = importlib.util.spec_from_file_location("trellis_branch", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "branch_policy.py"
+ENTRYPOINT = SCRIPT.with_name("embedded-agent-branch")
+SPEC = importlib.util.spec_from_file_location("branch_policy", SCRIPT)
 branch = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
-sys.modules["trellis_branch"] = branch
+sys.modules["branch_policy"] = branch
 SPEC.loader.exec_module(branch)
 
 
 class BranchFormatTests(unittest.TestCase):
+    def test_executable_shim_targets_branch_policy_module(self):
+        source = ENTRYPOINT.read_text(encoding="utf-8")
+
+        self.assertIn("branch_policy.py", source)
+        self.assertNotIn("trellis_branch.py", source)
+
     def test_formats_canonical_component_branch(self):
         value = branch.build_branch("sample.dev", "production-test", "soc", "20260718")
         self.assertTrue(value["ok"])

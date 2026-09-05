@@ -25,7 +25,7 @@ Before writing or delegation begins, record:
 - outcome owner and delegated results.
 - active repository, workspace, branch and exact Commit.
 - allowed write paths and forbidden actions.
-- required Spec, Knowledge and task context.
+- required Engineering Rules, Knowledge and active context.
 - required capabilities and selected Adapters.
 - expected evidence and handoff location.
 
@@ -35,7 +35,7 @@ scope, risk or acceptance, pause for the user instead of inventing it.
 ## Capability Routing
 
 Keep work on the current host when it has the repository, tools and authority.
-Use a remote Codex task when another host should own a substantial result or the
+Use a remote Agent task when another host should own a substantial result or the
 complete project. Use a native subagent only for bounded work inside the current
 task. Use a Runtime Job for persistent operations without reasoning.
 
@@ -61,9 +61,10 @@ Do not overwrite a dirty workspace or use an implicit merging `git pull`.
 Targeted copy is acceptable for an explicit deployment or short-lived
 verification input, but it does not become the source of truth.
 
-Validate task branches with `trellis-branch check`. Runtime Git mutations must
-match the exact current branch and task-approved include paths. Commits, pushes
-and branch rewrites require the authority defined by the current task.
+When a project adopts the bundled reference branch policy, validate it with
+`embedded-agent-branch check`. Runtime Git mutations must match the exact
+current branch and task-approved include paths. Commits, pushes and branch
+rewrites require the authority defined by the current task.
 
 ## Runtime Interface
 

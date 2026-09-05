@@ -1,11 +1,12 @@
-# Embedded Runtime Workflow
+# Windows Runtime Capabilities
 
-This spec defines the entry flow for tasks that need Windows Runtime
-capabilities. It complements the host-neutral Trellis workflow and does not
-assign planning or project ownership to a specific host.
+This rule describes the fixed capability surface for work that needs the
+Windows Runtime. It does not assign planning or project ownership to a
+specific host.
 
-`embedded-agent` is a machine-level client/runtime contract. Do not assume a
-project-local `.trellis/agents/` copy exists or use one as the update source.
+`embedded-agent` is a machine-level client/runtime contract. Project rules,
+generated context, and project knowledge are separate from its deployed source
+and machine state.
 
 ## Scope
 
@@ -19,8 +20,8 @@ This page covers only routine runtime entry rules:
 - build environment and build evidence expectations.
 
 Hardware-changing operations such as flash, reset-mode capture, eFuse,
-production signing, destructive cleanup or board-farm control are intentionally
-out of scope here. Use `.trellis/spec/agent-governance.md` for those gates.
+production signing, destructive cleanup, or board-farm control are governed by
+`agent-governance.md` and the matching Capability Contract.
 
 ## 1. Project Background Check
 
@@ -55,6 +56,9 @@ embedded-agent project discover \
 
 Rules:
 
+- The workspace must be a real directory under the machine-owned
+  `EMBEDDED_AGENT_WORKSPACE_ROOT`; a caller cannot expand this root or traverse
+  a symlink/junction to register another host path.
 - Project background is stable task context. Do not rediscover it on every AI
   turn.
 - Do not infer the MCU Keil project from organization-specific directory conventions, names
@@ -227,12 +231,13 @@ embedded-agent job start \
 embedded-agent job start \
   --project <project-id> \
   --kind jenkins-wait \
+  --connection-id <connection-id> \
   --job <jenkins-job> \
   --build <build-number> \
   --json
 ```
 
-Keep the returned `job_id` in the task Context Packet, then inspect only new
+Keep the returned `job_id` in the active context, then inspect only new
 output:
 
 ```bash
@@ -256,7 +261,23 @@ Rules:
 - Cancel requires `--confirm` and terminates only the process tree owned by that
   Job. Device operations remain outside this command surface.
 
-## 7. CAN Runtime Module
+## 7. Aboot MPU Flash
+
+MPU flash selects a machine-owned Aboot binding by opaque id:
+
+```bash
+embedded-agent flash --project <project-id> --target mpu \
+  --connection-id <connection-id> --package <release.zip> --usb-only \
+  --require-confirm --confirm --json
+```
+
+The fixed deployment-root `aboot-connections.json` binds that id to one
+canonical `adownload.exe`, its mandatory SHA-256 and an approved firmware root.
+The registry, executable and path components must not be symlinks/reparse
+points. Project paths, `--aboot-root`, `--firmware-root` and task environment
+variables cannot select an executable or external firmware root.
+
+## 8. CAN Runtime Module
 
 Use the fixed CAN command surface instead of importing vendor DLLs from task
 scripts:
@@ -273,23 +294,36 @@ embedded-agent can send --driver controlcan --frame 0x123#01020304 --require-con
 Rules:
 
 - ControlCAN and ZCANPro are Driver Adapters behind one CAN Runtime Interface.
+- Physical Driver Adapters are available only when the Runtime installation's
+  fixed `can-drivers.json` binds the driver to a canonical regular DLL file.
+  The path must contain no symlink/reparse component; an optional SHA-256 pins
+  its content. Project files, CLI arguments and task environment variables
+  cannot select a different native library.
 - Driver listing, preflight and self-test must not open hardware. A bounded device probe may only open and immediately close fixed candidates; it must not initialize a channel or transmit.
 - Monitoring must have a duration or frame-count bound.
-- Send, replay and UDS operations require the L3 confirmation gate.
+- Send, replay, and UDS operations require explicit external-state-change
+  confirmation.
 - DLL architecture, Python packages and vendor library paths belong to the
   Adapter implementation and must not leak into project task scripts.
 
-## Relationship To Other Specs
+## 9. RTT Capture
 
-- `.trellis/spec/agent-governance.md`: authority boundaries, high-risk gates
-  and evidence standard.
-- `.trellis/spec/evidence-first-engineering.md`: active-target proof, log timing
-  protocol and layered completion claims.
-- `.trellis/spec/project-discovery.md`: discovery and generated profile rules.
-- `.trellis/spec/verification.md`: completion and validation expectations.
-- `.trellis/spec/native-subagent-workflow.md`: read-only Scout delegation and
-  context-return rules.
-- `.trellis/spec/platform-operating-model.md`: host-neutral ownership and
-  capability routing.
-- `.trellis/knowledge/architecture/dual-machine-agent-system.md`: optional
-  multi-host topology and Runtime Adapter notes.
+Attach-only capture is read-only. A capture that resets the target is an L3
+external-state change and must pass both confirmation flags:
+
+```bash
+embedded-agent rtt capture --project <project-id> --target mcu --json
+embedded-agent rtt capture --project <project-id> --target mcu \
+  --reset --require-confirm --confirm --json
+```
+
+Do not infer reset authorization from an earlier attach-only capture.
+
+## Related Rules
+
+- `agent-governance.md`: authority, high-risk gates, and evidence.
+- `evidence-first-engineering.md`: active-target proof and layered claims.
+- `project-discovery.md`: generated project and target facts.
+- `verification.md`: completion and validation expectations.
+- `platform-operating-model.md`: host-neutral ownership and routing.
+- `guides/agent-delegation.md`: bounded delegation between Agents.

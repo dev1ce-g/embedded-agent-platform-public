@@ -18,7 +18,7 @@ controls the target behavior. Acceptable evidence includes:
 
 A matching directory name, newer-looking copy, sibling platform or reference
 project does not satisfy this gate. Record the selected target and evidence in
-the task Context Packet. If the gate fails, continue read-only discovery.
+the active context. If the gate fails, continue read-only discovery.
 
 ## Design Proportionality
 
@@ -40,7 +40,7 @@ them in the current path.
 When the user or new repository evidence invalidates a path, target, timing
 semantics or scope:
 
-1. Mark the old statement as invalid in the Context Packet.
+1. Mark the old statement as invalid in the active context.
 2. Update target paths, contracts, acceptance criteria and plan.
 3. Search current changes and pending actions for dependencies on the old
    statement.

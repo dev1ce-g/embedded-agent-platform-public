@@ -1,0 +1,22 @@
+{
+  "schema_version": "embedded-rule-catalog/v1",
+  "packs": [
+    {
+      "id": "embedded-engineering-v1",
+      "version": 1,
+      "name": "Embedded Engineering",
+      "description": "Model-independent rules for brownfield embedded engineering, capability routing, safety, and evidence.",
+      "path": "rules/embedded-engineering-v1",
+      "projection": ".embedded-agent/rules/platform",
+      "tags": [
+        "embedded",
+        "mcu",
+        "mpu",
+        "soc",
+        "brownfield",
+        "capability-plane",
+        "windows-runtime"
+      ]
+    }
+  ]
+}

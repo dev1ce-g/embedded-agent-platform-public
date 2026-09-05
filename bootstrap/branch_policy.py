@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate, validate, and create Trellis embedded task branches."""
+"""Generate, validate, and create embedded project task branches."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "trellis-branch-policy/v1"
+SCHEMA_VERSION = "embedded-agent-branch-policy/v1"
 DEVELOPER_RE = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 TASK_BRANCH_RE = re.compile(
@@ -21,16 +21,15 @@ TASK_BRANCH_RE = re.compile(
     r"(?P<task>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<date>[0-9]{8})$"
 )
 RESERVED_DEVELOPERS = {
+    "agent",
     "ai",
+    "bot",
     "bugfix",
     "chore",
-    "claude",
-    "codex",
     "docs",
     "feat",
     "feature",
     "fix",
-    "grok",
     "hotfix",
     "refactor",
     "test",
@@ -92,7 +91,7 @@ def validate_branch(
             2,
             branch=branch,
             expected="<developer>-<task-slug>-<YYYYMMDD>",
-            first_failure="Task branch does not match the canonical Trellis naming format",
+            first_failure="Task branch does not match the embedded project naming format",
         )
     developer = match.group("developer")
     if developer in RESERVED_DEVELOPERS:
@@ -102,7 +101,7 @@ def validate_branch(
             2,
             branch=branch,
             developer=developer,
-            first_failure="Task branch must identify the human owner, not a change type or model",
+            first_failure="Task branch must identify the human owner, not a change type or generic Agent",
         )
     if expected_developer and developer != expected_developer:
         return result(
@@ -229,7 +228,7 @@ def command_create(args: argparse.Namespace) -> int:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     json_requested = "--json" in argv
     argv = [argument for argument in argv if argument != "--json"]
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="embedded-agent-branch", description=__doc__)
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
