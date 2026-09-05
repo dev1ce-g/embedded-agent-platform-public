@@ -20,8 +20,8 @@ class WindowsRuntimeInstallerTests(unittest.TestCase):
             command = [sys.executable, str(INSTALLER), "--prefix", str(prefix), "--json"]
             environment = os.environ.copy()
             environment["PYTHONIOENCODING"] = "cp1252"
-            first = subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
-            second = subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
+            first = subprocess.run(command, encoding="utf-8", capture_output=True, check=False, env=environment)
+            second = subprocess.run(command, encoding="utf-8", capture_output=True, check=False, env=environment)
 
             self.assertEqual(0, first.returncode, first.stderr)
             self.assertEqual(0, second.returncode, second.stderr)
@@ -67,7 +67,7 @@ class WindowsRuntimeInstallerTests(unittest.TestCase):
             environment["EMBEDDED_AGENT_ROOT"] = str(prefix / "attacker-selected-state")
             status = subprocess.run(
                 [sys.executable, str(prefix / "bin" / "embedded-agent.py"), "status", "--json"],
-                text=True,
+                encoding="utf-8",
                 capture_output=True,
                 check=False,
                 env=environment,
