@@ -120,20 +120,17 @@ class GitCreateBranchCommitTests(unittest.TestCase):
             "truncated": False,
             "first_failure": None,
         }
-        with patch.object(embedded_runtime_sdk, "run_sdk_manager", return_value=backend) as manager:
+        trusted_manager = self.base / "runtime-sdk-manager.py"
+        trusted_manager.write_text("# test-only internal dependency\n", encoding="utf-8")
+        with (
+            patch.object(
+                embedded_runtime_sdk,
+                "trusted_sdk_manager",
+                return_value=(trusted_manager, None),
+            ),
+            patch.object(embedded_runtime_sdk, "run_sdk_manager", return_value=backend) as manager,
+        ):
             exit_code, value = self.call(
-                "--sdk-manager", str(self.base / "sdk_manager.py"),
-                "sdk", "project-pull", "--project", self.project,
-                "--sdk-name", "hqa802", "--sdk-version", "r09v03", "--confirm",
-            )
-
-        self.assertEqual(exit_code, 2)
-        self.assertEqual(value["first_failure"], "SDK Manager not found")
-
-        (self.base / "sdk_manager.py").write_text("# test\n", encoding="utf-8")
-        with patch.object(embedded_runtime_sdk, "run_sdk_manager", return_value=backend) as manager:
-            exit_code, value = self.call(
-                "--sdk-manager", str(self.base / "sdk_manager.py"),
                 "sdk", "project-pull", "--project", self.project,
                 "--sdk-name", "hqa802", "--sdk-version", "r09v03", "--confirm",
             )

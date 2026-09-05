@@ -1,0 +1,11 @@
+{
+  "schema_version": "embedded-can-driver-config/v1",
+  "drivers": {
+    "controlcan": {
+      "dll": "C:\\Program Files\\ZLG\\ControlCAN.dll"
+    },
+    "zcanpro": {
+      "dll": "C:\\Program Files\\ZCANPRO\\zlgcan.dll"
+    }
+  }
+}

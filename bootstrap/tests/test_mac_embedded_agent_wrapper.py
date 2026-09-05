@@ -14,12 +14,13 @@ WRAPPER = ROOT / "runtime" / "mac" / "bin" / "embedded-agent"
 
 
 class MacEmbeddedAgentWrapperTests(unittest.TestCase):
-    def test_relocated_runtime_configuration_is_forwarded(self) -> None:
+    def test_relocated_runtime_forwards_only_arguments_to_stable_launcher(self) -> None:
         source = WRAPPER.read_text(encoding="utf-8")
 
         self.assertIn("EMBEDDED_AGENT_REMOTE_PREFIX", source)
-        self.assertIn('"root": sys.argv[2]', source)
-        self.assertIn('"agentctl": sys.argv[3]', source)
+        self.assertIn('{"args": sys.argv[1:]}', source)
+        self.assertNotIn("EMBEDDED_AGENT_REMOTE_ROOT", source)
+        self.assertNotIn("EMBEDDED_AGENT_REMOTE_AGENTCTL", source)
         self.assertIn('py -3 "$remote_script" --payload-b64 "$encoded"', source)
         self.assertNotIn("powershell -NoProfile", source)
         self.assertIn("embedded-agent git switch --project <id>", source)
@@ -63,6 +64,13 @@ class MacEmbeddedAgentWrapperTests(unittest.TestCase):
         self.assertEqual(255, completed.returncode)
         payload = json.loads(completed.stdout)
         self.assertFalse(payload["ok"])
+        self.assertEqual("embedded-capability-result/v1", payload["schema_version"])
+        self.assertEqual("1.0.0", payload["contract_version"])
+        self.assertEqual("agent.transport", payload["capability_id"])
+        self.assertEqual("execute", payload["phase"])
+        self.assertEqual("failed", payload["state"])
+        self.assertEqual([], payload["evidence"])
+        self.assertEqual("SSH_TRANSPORT_UNAVAILABLE", payload["error"]["code"])
         self.assertEqual("agent-transport", payload["operation"])
         self.assertEqual("SSH_TRANSPORT_UNAVAILABLE", payload["error_code"])
         self.assertEqual("test-agent", payload["host"])
@@ -94,6 +102,7 @@ class MacEmbeddedAgentWrapperTests(unittest.TestCase):
         self.assertEqual(2, completed.returncode)
         payload = json.loads(completed.stdout)
         self.assertEqual("SSH_TRANSPORT_CONFIGURATION_MISSING", payload["error_code"])
+        self.assertEqual("SSH_TRANSPORT_CONFIGURATION_MISSING", payload["error"]["code"])
 
 
 if __name__ == "__main__":

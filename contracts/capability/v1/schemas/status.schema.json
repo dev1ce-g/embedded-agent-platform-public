@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "status.schema.json",
+  "title": "Embedded Capability Status v1",
+  "type": "object",
+  "required": ["schema_version", "contract_version", "queried_at", "execution"],
+  "properties": {
+    "schema_version": {"const": "embedded-capability-status/v1"},
+    "contract_version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$"},
+    "queried_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "execution": {"$ref": "execution.schema.json"}
+  },
+  "additionalProperties": false
+}

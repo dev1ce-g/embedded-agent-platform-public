@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import hashlib
 import importlib.util
 import io
 import json
 import os
-import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +25,15 @@ import can_middleware
 import embedded_agent
 import embedded_runtime_can
 import zcanpro_dll
+
+
+def write_driver_config(root: Path, drivers: dict) -> Path:
+    path = root / "can-drivers.json"
+    path.write_text(
+        json.dumps({"schema_version": can_middleware.DRIVER_CONFIG_SCHEMA, "drivers": drivers}),
+        encoding="utf-8",
+    )
+    return path
 
 
 class CanMiddlewareTests(unittest.TestCase):
@@ -57,18 +66,22 @@ class CanMiddlewareTests(unittest.TestCase):
     def test_arch_specific_packages_precede_legacy_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            architecture_site = root / "site-packages-x64"
+            architecture = can_middleware.process_architecture()
+            architecture_site = root / f"site-packages-{architecture}"
             legacy_site = root / "site-packages"
             architecture_site.mkdir()
             legacy_site.mkdir()
             (architecture_site / "priority_probe.py").write_text("VALUE = 'architecture'\n", encoding="utf-8")
-            (legacy_site / "priority_probe.py").write_text("VALUE = 'legacy'\n", encoding="utf-8")
+            (legacy_site / "priority_probe.py").write_text("raise RuntimeError('legacy selected')\n", encoding="utf-8")
+            with mock.patch.object(can_middleware, "CAN_RUNTIME_ROOT", root):
+                modules = can_middleware.runtime_modules(Path(sys.executable), architecture, ("priority_probe",))
+        self.assertTrue(modules["priority_probe"])
+
+    def test_can_runtime_root_cannot_be_overridden_by_task_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             environment = os.environ.copy()
-            environment["EMBEDDED_CAN_RUNTIME"] = str(root)
-            code = (
-                f"import sys; sys.path.insert(0, {str(BIN)!r}); "
-                "import can_middleware, priority_probe; print(priority_probe.VALUE)"
-            )
+            environment["EMBEDDED_CAN_RUNTIME"] = directory
+            code = f"import sys; sys.path.insert(0, {str(BIN)!r}); import can_middleware; print(can_middleware.CAN_RUNTIME_ROOT)"
             completed = subprocess.run(
                 [sys.executable, "-c", code],
                 stdout=subprocess.PIPE,
@@ -78,7 +91,7 @@ class CanMiddlewareTests(unittest.TestCase):
                 env=environment,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "architecture")
+        self.assertEqual(Path(completed.stdout.strip()), RUNTIME.parent / "can-runtime")
 
     def test_runtime_modules_requires_successful_import(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -99,7 +112,7 @@ class CanMiddlewareTests(unittest.TestCase):
 
         self.assertEqual(spec.adapter, "zcanpro_dll")
         self.assertEqual(spec.required_modules, ("can",))
-        self.assertIn(sys.executable, spec.runtime_candidates)
+        self.assertTrue(spec.requires_dll)
 
     def test_zcanpro_direct_adapter_opens_starts_transmits_and_closes(self) -> None:
         events: list[tuple] = []
@@ -179,12 +192,13 @@ class CanMiddlewareTests(unittest.TestCase):
         fake_can = types.SimpleNamespace(BusABC=FakeBusABC, Message=FakeMessage, Bus=reject_canalystii)
         fake_controlcan = types.SimpleNamespace(ControlCan=FakeControlCan, parse_dev_type=lambda value: int(value, 0))
         with tempfile.TemporaryDirectory() as directory:
-            dll = Path(directory) / "ControlCAN.dll"
+            root = Path(directory)
+            dll = root / "ControlCAN.dll"
             dll.write_bytes(b"not-a-real-pe")
-            inventory = [{"dll": str(dll)}]
+            config = write_driver_config(root, {"controlcan": {"dll": str(dll)}})
             with (
                 mock.patch.dict(sys.modules, {"can": fake_can, "pc_uds_ecu_sim": fake_controlcan}),
-                mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
                 mock.patch.object(can_middleware, "pe_architecture", return_value="unknown"),
             ):
                 _, bus = can_middleware.open_bus("controlcan", channel=0, bitrate=500000, device_index=0)
@@ -208,12 +222,16 @@ class CanMiddlewareTests(unittest.TestCase):
                 }
             ),
         }
-        inventory = [{"dll": r"C:\Vendor\ControlCAN.dll"}]
-        with (
-            mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
-            mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
-        ):
-            exit_code, value = self.call("can", "device-probe", "--driver", "controlcan")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dll = root / "ControlCAN.dll"
+            dll.write_bytes(b"trusted-driver")
+            config = write_driver_config(root, {"controlcan": {"dll": str(dll)}})
+            with (
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
+                mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
+            ):
+                exit_code, value = self.call("can", "device-probe", "--driver", "controlcan")
         self.assertEqual(exit_code, 0)
         self.assertEqual(value["matches"], [{"device_model": 20, "device_index": 1}])
 
@@ -240,12 +258,16 @@ class CanMiddlewareTests(unittest.TestCase):
                 }
             ),
         }
-        inventory = [{"dll": r"C:\Vendor\ZCANPro\zlgcan.dll"}]
-        with (
-            mock.patch.object(can_middleware, "driver_inventory", return_value=inventory),
-            mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
-        ):
-            exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dll = root / "zlgcan.dll"
+            dll.write_bytes(b"trusted-driver")
+            config = write_driver_config(root, {"zcanpro": {"dll": str(dll)}})
+            with (
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
+                mock.patch.object(embedded_runtime_can, "_run_tool", return_value=backend),
+            ):
+                exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro")
         self.assertEqual(exit_code, 0)
         self.assertEqual(value["matches"], [{"device_model": 4, "device_index": 0}])
 
@@ -265,32 +287,90 @@ class CanMiddlewareTests(unittest.TestCase):
             ZCAN_GetDeviceInf=fail_device_info,
             ZCAN_CloseDevice=lambda *_args: events.append("close") or 1,
         )
-        with (
-            mock.patch.object(probe_zcanpro, "load_library", return_value=(fake_dll, [])),
-            mock.patch.object(probe_zcanpro, "bind_library"),
-            mock.patch.object(probe_zcanpro, "pe_machine", return_value="unknown"),
-        ):
-            results = probe_zcanpro.probe(Path("zlgcan.dll"), [4], [0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dll = root / "zlgcan.dll"
+            dll.write_bytes(b"trusted-driver")
+            config = write_driver_config(root, {"zcanpro": {"dll": str(dll)}})
+            with (
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
+                mock.patch.object(probe_zcanpro, "load_library", return_value=(fake_dll, [])),
+                mock.patch.object(probe_zcanpro, "bind_library"),
+                mock.patch.object(probe_zcanpro, "pe_machine", return_value="unknown"),
+            ):
+                results = probe_zcanpro.probe(dll, [4], [0])
 
         self.assertEqual(events, ["open", "device-info", "close"])
         self.assertEqual(results[0]["close"], 1)
         self.assertIn("device info failed", results[0]["error"])
 
-    def test_zcanpro_device_probe_propagates_architecture_failure(self) -> None:
+    def test_workspace_dll_is_rejected_before_subprocess_or_ctypes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            dll = Path(directory) / "zlgcan.dll"
-            content = bytearray(256)
-            content[0x3C:0x40] = (128).to_bytes(4, "little")
-            opposite_machine = 0x014C if struct.calcsize("P") == 8 else 0x8664
-            content[132:134] = opposite_machine.to_bytes(2, "little")
-            dll.write_bytes(content)
+            root = Path(directory)
+            trusted = root / "vendor" / "zlgcan.dll"
+            trusted.parent.mkdir()
+            trusted.write_bytes(b"trusted-driver")
+            malicious = root / "workspace" / "zlgcan.dll"
+            malicious.parent.mkdir()
+            malicious.write_bytes(b"malicious-driver")
+            config = write_driver_config(root, {"zcanpro": {"dll": str(trusted)}})
+            with (
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
+                mock.patch.object(embedded_runtime_can, "_run_tool") as run_tool,
+                mock.patch.object(ctypes, "CDLL", side_effect=AssertionError("ctypes must not run")),
+            ):
+                exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro", "--dll", str(malicious))
 
-            exit_code, value = self.call("can", "device-probe", "--driver", "zcanpro", "--dll", str(dll))
-
-        self.assertEqual(exit_code, 1)
+        self.assertEqual(exit_code, 2)
         self.assertFalse(value["ok"])
-        self.assertIn("run this adapter", value["first_failure"])
-        self.assertNotIn('"operation":"probe-zcanpro"', value["first_failure"])
+        self.assertIn("not allowed", value["first_failure"])
+        run_tool.assert_not_called()
+
+    def test_driver_hash_mismatch_makes_capability_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dll = root / "ControlCAN.dll"
+            dll.write_bytes(b"actual")
+            config = write_driver_config(root, {"controlcan": {"dll": str(dll), "sha256": hashlib.sha256(b"expected").hexdigest()}})
+            with mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config):
+                inventory = can_middleware.driver_inventory("controlcan")[0]
+        self.assertFalse(inventory["ready"])
+        self.assertIn("sha256", "; ".join(inventory["blockers"]))
+
+    def test_symlinked_driver_is_not_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real_dll = root / "vendor" / "ControlCAN.dll"
+            real_dll.parent.mkdir()
+            real_dll.write_bytes(b"trusted-driver")
+            link = root / "ControlCAN.dll"
+            try:
+                link.symlink_to(real_dll)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            config = write_driver_config(root, {"controlcan": {"dll": str(link)}})
+            with mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config):
+                inventory = can_middleware.driver_inventory("controlcan")[0]
+        self.assertFalse(inventory["ready"])
+        self.assertIn("symlink or reparse", "; ".join(inventory["blockers"]))
+
+    def test_zcanpro_loader_rejects_unconfigured_path_before_ctypes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "vendor" / "zlgcan.dll"
+            trusted.parent.mkdir()
+            trusted.write_bytes(b"trusted-driver")
+            malicious = root / "workspace" / "zlgcan.dll"
+            malicious.parent.mkdir()
+            malicious.write_bytes(b"malicious-driver")
+            config = write_driver_config(root, {"zcanpro": {"dll": str(trusted)}})
+            with (
+                mock.patch.object(can_middleware, "DRIVER_CONFIG_PATH", config),
+                mock.patch.object(zcanpro_dll.ctypes, "CDLL") as loader,
+            ):
+                with self.assertRaisesRegex(can_middleware.DriverTrustError, "not allowed"):
+                    zcanpro_dll.load_library(str(malicious))
+        loader.assert_not_called()
 
     def test_self_test_does_not_require_can_driver(self) -> None:
         exit_code, value = self.call("can", "self-test")

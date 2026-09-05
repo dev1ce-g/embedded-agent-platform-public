@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from embedded_runtime_common import *
+from embedded_runtime_knowledge import compare_background_fingerprints
 
 def run_sdk_manager(
     args: argparse.Namespace,
@@ -10,7 +11,24 @@ def run_sdk_manager(
     *,
     cwd: Path | None = None,
 ) -> dict[str, Any]:
-    command = [sys.executable, str(args.sdk_manager), *manager_args]
+    manager, trust_failure = trusted_sdk_manager()
+    if manager is None:
+        message = trust_failure or "SDK Manager capability unavailable"
+        return {
+            "ok": False,
+            "exit_code": 126,
+            "stdout": "",
+            "stderr": message,
+            "stdout_bytes": 0,
+            "stderr_bytes": len(message.encode("utf-8", errors="replace")),
+            "truncated": False,
+            "capability_available": False,
+            "first_failure": message,
+        }
+    command = [sys.executable, str(manager), *manager_args]
+    environment = os.environ.copy()
+    environment.pop("EMBEDDED_AGENTCTL", None)
+    environment.pop("EMBEDDED_SDK_MANAGER", None)
     try:
         completed = subprocess.run(
             command,
@@ -19,7 +37,7 @@ def run_sdk_manager(
             stderr=subprocess.PIPE,
             check=False,
             timeout=max(1, args.timeout),
-            env=os.environ.copy(),
+            env=environment,
         )
     except subprocess.TimeoutExpired as exc:
         stdout, stdout_bytes, stdout_truncated = bounded_output(exc.stdout, args.max_bytes)
@@ -59,8 +77,6 @@ def run_sdk_manager(
     }
 
 def sdk_workspace(args: argparse.Namespace, paths: AgentPaths) -> tuple[Path | None, dict[str, Any] | None]:
-    if args.workspace:
-        return Path(args.workspace).expanduser().resolve(), None
     background = read_background(paths, args.project)
     if background:
         return Path(background["workspace"]).resolve(), background
@@ -79,14 +95,14 @@ def sdk_source(args: argparse.Namespace) -> tuple[Path | None, dict[str, Any] | 
     component = Path(args.component)
     if component.is_absolute() or not args.component.strip():
         return None, None, "SDK component must be a relative path"
-    store = Path(args.sdk_store).resolve()
+    store = DEFAULT_SDK_STORE.resolve()
     source = (store / "current" / args.sdk / component).resolve()
     versions = (store / "versions").resolve()
     if not is_relative_to(source, versions):
         return None, None, "SDK component does not resolve inside the managed versions store"
     if not source.is_dir():
         return None, None, "SDK component directory does not exist"
-    lock = read_sdk_lock(Path(args.sdk_lock))
+    lock = read_sdk_lock(DEFAULT_SDK_LOCK)
     if not lock:
         return None, None, "SDK lock is missing or invalid"
     package = (lock.get("packages") or {}).get(args.sdk)
@@ -164,6 +180,21 @@ def sdk_mapping_command(args: argparse.Namespace, paths: AgentPaths, workspace: 
     if not target_info["inside_workspace"]:
         return fail_outside_workspace(operation, {"project_id": project_id, "workspace": str(workspace)}, target_info, args.json)
     target = target_info["path"]
+    unsafe_ancestor, ancestor_failure = validate_non_reparse_ancestors(workspace, target)
+    if ancestor_failure:
+        value = result(
+            False,
+            operation,
+            5,
+            project_id=project_id,
+            workspace=str(workspace),
+            target=target_info["project_path"],
+            normalized_target=str(target),
+            unsafe_ancestor=str(unsafe_ancestor) if unsafe_ancestor else None,
+            first_failure=ancestor_failure,
+        )
+        print_result(value, args.json)
+        return 5
     kind = mapping_kind(target)
     resolved_target = target.resolve() if target.exists() else None
     link_valid = kind in {"junction", "symlink"} and resolved_target == source
@@ -283,101 +314,60 @@ def sdk_mapping_command(args: argparse.Namespace, paths: AgentPaths, workspace: 
     print_result(value, args.json)
     return int(value["exit_code"])
 
-def workspace_git_state(workspace: Path) -> list[dict[str, Any]]:
-    candidates = [workspace]
-    try:
-        candidates.extend(child for child in workspace.iterdir() if child.is_dir())
-    except OSError:
-        return []
-    repos: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if not (candidate / ".git").exists():
-            continue
-        status = run_git_read(candidate, ["status", "--porcelain=v1"], max_bytes=DEFAULT_GIT_BYTES)
-        repos.append({
-            "path": rel(candidate, workspace),
-            "dirty": bool(status["stdout"].strip()) if status["ok"] else None,
-            "status_ok": status["ok"],
-            "first_failure": status["first_failure"],
-        })
-    return repos
-
-def command_workspace(args: argparse.Namespace) -> int:
-    paths = agent_paths(args.root)
-    background = read_background(paths, args.project)
-    operation = f"workspace-{args.workspace_action}"
-    if not background:
-        value = result(False, operation, 2, project_id=safe_project_id(args.project), first_failure="Project background not found")
-        print_result(value, args.json)
-        return 2
-    workspace = Path(background["workspace"]).resolve()
-    allowed_root = Path(args.workspace_root).resolve()
-    try:
-        relative_workspace = workspace.relative_to(allowed_root)
-    except ValueError:
-        value = result(False, operation, 5, project_id=background["project_id"], workspace=str(workspace), allowed_root=str(allowed_root), first_failure="Registered workspace is outside the Agent workspace root")
-        print_result(value, args.json)
-        return 5
-    if len(relative_workspace.parts) < 2 or workspace == allowed_root:
-        value = result(False, operation, 5, project_id=background["project_id"], workspace=str(workspace), allowed_root=str(allowed_root), first_failure="Workspace path is too broad for removal")
-        print_result(value, args.json)
-        return 5
-    if not workspace.exists():
-        value = result(True, operation, project_id=background["project_id"], background_id=background["background_id"], workspace=str(workspace), removed=False, already_missing=True)
-        print_result(value, args.json)
-        return 0
-    if mapping_kind(workspace) in {"junction", "symlink"}:
-        value = result(False, operation, 5, project_id=background["project_id"], workspace=str(workspace), first_failure="Registered workspace root is a link or junction")
-        print_result(value, args.json)
-        return 5
-    repos = workspace_git_state(workspace)
-    unknown_repos = [repo for repo in repos if repo["status_ok"] is not True]
-    dirty_repos = [repo for repo in repos if repo["dirty"] is True]
-    if unknown_repos:
-        value = result(False, operation, 5, project_id=background["project_id"], workspace=str(workspace), repositories=repos, first_failure="Cannot verify Git status for all workspace repositories")
-        print_result(value, args.json)
-        return 5
-    if dirty_repos and not args.allow_dirty:
-        value = result(False, operation, 4, project_id=background["project_id"], workspace=str(workspace), repositories=repos, dirty_repositories=dirty_repos, requires_allow_dirty=True, first_failure="Workspace contains uncommitted or untracked Git changes; rerun with --allow-dirty only after review")
-        print_result(value, args.json)
-        return 4
-    if not args.confirm:
-        value = result(False, operation, 3, project_id=background["project_id"], workspace=str(workspace), repositories=repos, requires_human_confirm=True, first_failure="Workspace removal is irreversible; rerun with --confirm")
-        print_result(value, args.json)
-        return 3
-    intent = result(True, operation, project_id=background["project_id"], background_id=background["background_id"], workspace=str(workspace), gate={"level": "L4", "requires_human_confirm": True, "confirmed": True, "allow_dirty": args.allow_dirty}, repositories=repos, removal_started=True)
-    append_run(paths, background["project_id"], intent)
-    try:
-        shutil.rmtree(workspace)
-    except OSError as exc:
-        value = result(False, operation, 4, project_id=background["project_id"], background_id=background["background_id"], workspace=str(workspace), removed=False, first_failure=str(exc))
-        append_run(paths, background["project_id"], value)
-        print_result(value, args.json)
-        return 4
-    value = result(True, operation, project_id=background["project_id"], background_id=background["background_id"], workspace=str(workspace), removed=not workspace.exists(), registry_preserved=True, gate=intent["gate"], repositories=repos, first_failure=None if not workspace.exists() else "Workspace still exists after removal")
-    append_run(paths, background["project_id"], value)
-    print_result(value, args.json)
-    return 0 if value["removed"] else 4
-
 def command_sdk(args: argparse.Namespace) -> int:
     operation = f"sdk-{args.sdk_action}"
-    manager = Path(args.sdk_manager)
-    config = manager.parent / "sdk.cfg"
+    manager, trust_failure = trusted_sdk_manager()
+    manager_path = manager or DEFAULT_SDK_MANAGER
+    config = manager_path.parent / "sdk.cfg"
     if args.sdk_action == "status":
+        ready = manager is not None and config.is_file()
         value = result(
-            manager.is_file() and config.is_file(),
+            ready,
             operation,
-            0 if manager.is_file() and config.is_file() else 2,
-            sdk_manager=str(manager),
-            manager_exists=manager.is_file(),
+            0 if ready else 2,
+            sdk_manager=str(manager_path),
+            manager_exists=manager is not None,
             config_path=str(config),
             config_exists=config.is_file(),
-            first_failure=None if manager.is_file() and config.is_file() else "SDK Manager or adjacent sdk.cfg is missing",
+            capability_available=manager is not None,
+            first_failure=None if ready else trust_failure or "Runtime-owned SDK Manager configuration is missing",
         )
         print_result(value, args.json)
         return int(value["exit_code"])
-    if not manager.is_file():
-        value = result(False, operation, 2, sdk_manager=str(manager), first_failure="SDK Manager not found")
+    if args.sdk_action == "components":
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.sdk):
+            value = result(False, operation, 2, first_failure="Invalid SDK name")
+            print_result(value, args.json)
+            return 2
+        component = Path(args.component)
+        if component.is_absolute() or not args.component.strip():
+            value = result(False, operation, 2, first_failure="SDK component must be a relative path")
+            print_result(value, args.json)
+            return 2
+        store = DEFAULT_SDK_STORE.resolve()
+        source = (store / "current" / args.sdk / component).resolve()
+        versions = (store / "versions").resolve()
+        if not is_relative_to(source, versions) or not source.is_dir():
+            value = result(False, operation, 4, sdk=args.sdk, component=args.component, first_failure="SDK component directory does not exist inside managed store")
+            print_result(value, args.json)
+            return 4
+        entries = []
+        for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
+            entries.append({"name": child.name, "kind": "directory" if child.is_dir() else "file"})
+            if len(entries) >= min(max(1, args.max_entries), 500):
+                break
+        value = result(True, operation, sdk=args.sdk, component=Path(args.component).as_posix(), source=str(source), entries=entries, truncated=len(entries) >= min(max(1, args.max_entries), 500))
+        print_result(value, args.json)
+        return 0
+    if args.sdk_action in {"list", "search"} and manager is None:
+        value = result(
+            False,
+            operation,
+            2,
+            sdk_manager=str(manager_path),
+            capability_available=False,
+            first_failure=trust_failure or "SDK Manager capability unavailable",
+        )
         print_result(value, args.json)
         return 2
     if args.sdk_action == "list":
@@ -394,44 +384,46 @@ def command_sdk(args: argparse.Namespace) -> int:
         value = result(bool(backend["ok"]), operation, int(backend["exit_code"]), query=args.query, backend=backend)
         print_result(value, args.json)
         return int(value["exit_code"])
-    if args.sdk_action == "components":
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.sdk):
-            value = result(False, operation, 2, first_failure="Invalid SDK name")
-            print_result(value, args.json)
-            return 2
-        component = Path(args.component)
-        if component.is_absolute() or not args.component.strip():
-            value = result(False, operation, 2, first_failure="SDK component must be a relative path")
-            print_result(value, args.json)
-            return 2
-        store = Path(args.sdk_store).resolve()
-        source = (store / "current" / args.sdk / component).resolve()
-        versions = (store / "versions").resolve()
-        if not is_relative_to(source, versions) or not source.is_dir():
-            value = result(False, operation, 4, sdk=args.sdk, component=args.component, first_failure="SDK component directory does not exist inside managed store")
-            print_result(value, args.json)
-            return 4
-        entries = []
-        for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
-            entries.append({"name": child.name, "kind": "directory" if child.is_dir() else "file"})
-            if len(entries) >= min(max(1, args.max_entries), 500):
-                break
-        value = result(True, operation, sdk=args.sdk, component=Path(args.component).as_posix(), source=str(source), entries=entries, truncated=len(entries) >= min(max(1, args.max_entries), 500))
-        print_result(value, args.json)
-        return 0
 
     paths = agent_paths(args.root)
     workspace, background = sdk_workspace(args, paths)
     if workspace is None:
-        value = result(False, operation, 2, project_id=safe_project_id(args.project), first_failure="Project background not found and --workspace was not supplied")
+        value = result(False, operation, 2, project_id=safe_project_id(args.project), first_failure="Project background not found")
         print_result(value, args.json)
         return 2
     if not workspace.is_dir():
         value = result(False, operation, 4, project_id=safe_project_id(args.project), workspace=str(workspace), first_failure="SDK project workspace does not exist")
         print_result(value, args.json)
         return 4
+    if args.sdk_action in {"project-pull", "materialize"} and background:
+        stale = compare_background_fingerprints(background)
+        if stale["stale"]:
+            value = result(
+                False,
+                operation,
+                6,
+                project_id=background["project_id"],
+                background_id=background.get("background_id"),
+                workspace=str(workspace),
+                blocked=True,
+                stale=stale,
+                first_failure="Project background is stale",
+            )
+            print_result(value, args.json)
+            return 6
     if args.sdk_action in {"materialize", "check-mapping"}:
         return sdk_mapping_command(args, paths, workspace, background)
+    if manager is None:
+        value = result(
+            False,
+            operation,
+            2,
+            sdk_manager=str(manager_path),
+            capability_available=False,
+            first_failure=trust_failure or "SDK Manager capability unavailable",
+        )
+        print_result(value, args.json)
+        return 2
     manager_args = ["project-sdk"]
     if args.ci_dir:
         ci_dir = Path(args.ci_dir).expanduser()

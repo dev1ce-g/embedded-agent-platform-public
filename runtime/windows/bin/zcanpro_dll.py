@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import ctypes
 import os
-from pathlib import Path
 from typing import Any
+
+from can_middleware import require_trusted_driver_path
 
 
 STATUS_OK = 1
@@ -119,7 +120,8 @@ def _valid_handle(value: Any) -> bool:
 
 
 def load_library(path: str) -> tuple[Any, list[Any]]:
-    dll_path = Path(path).resolve()
+    dll_path = require_trusted_driver_path("zcanpro", path)
+    assert dll_path is not None
     directories = (dll_path.parent, dll_path.parent / "kerneldlls", dll_path.parent / "plugin")
     handles = []
     for directory in directories:

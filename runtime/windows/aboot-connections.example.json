@@ -1,0 +1,10 @@
+{
+  "schema_version": "embedded-aboot-connections/v1",
+  "connections": {
+    "lab-mpu": {
+      "adownload": "C:\\Tools\\aboot\\adownload.exe",
+      "adownload_sha256": "REPLACE_WITH_64_CHARACTER_SHA256",
+      "firmware_root": "C:\\Firmware"
+    }
+  }
+}

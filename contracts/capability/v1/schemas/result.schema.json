@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "result.schema.json",
+  "title": "Legacy-compatible Capability Contract v1 result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "capability_id",
+    "phase",
+    "state",
+    "ok",
+    "operation",
+    "exit_code",
+    "timestamp",
+    "evidence",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "embedded-capability-result/v1"},
+    "contract_version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$"},
+    "capability_id": {"$ref": "common.schema.json#/$defs/capability_id"},
+    "phase": {"type": "string", "enum": ["discover", "preflight", "execute", "status", "evidence"]},
+    "state": {
+      "type": "string",
+      "enum": ["ready", "approval_required", "blocked", "accepted", "queued", "running", "succeeded", "failed", "canceled"]
+    },
+    "ok": {"type": "boolean"},
+    "operation": {"type": "string", "minLength": 1},
+    "exit_code": {"type": "integer"},
+    "timestamp": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "platform_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional platform release version reported by discovery or status operations."
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/evidence_ref"}
+    },
+    "error": {
+      "anyOf": [
+        {"$ref": "common.schema.json#/$defs/error"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "additionalProperties": true
+}

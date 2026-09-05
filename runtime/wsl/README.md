@@ -11,7 +11,8 @@ export WSL_EMBEDDED_AGENT_PREFIX='/mnt/c/Users/you/AppData/Local/EmbeddedAgentPl
 embedded-agent status --json
 ```
 
-The prefix derives the Windows entry, state root, and backend paths. Advanced
-deployments may override them individually with `WSL_EMBEDDED_AGENT_SCRIPT`,
-`WSL_EMBEDDED_AGENT_ROOT`, and `WSL_EMBEDDED_AGENTCTL`. Set `WSL_WINDOWS_PY`
-only when `where py` cannot locate the Windows Python launcher.
+The prefix derives the stable Windows entry path. Advanced deployments may
+override that entry with `WSL_EMBEDDED_AGENT_SCRIPT`. State and backend paths
+remain owned by the installed Windows launcher and cannot be overridden by the
+transport. Set `WSL_WINDOWS_PY` only when `where py` cannot locate the Windows
+Python launcher.

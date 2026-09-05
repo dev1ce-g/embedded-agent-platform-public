@@ -98,13 +98,24 @@ def rtt_text(data: bytes) -> str:
 
 
 def write_jlink_script(path: Path, chip: str, wait_ms: int, reset: bool, rtt_address: str, cb_path: Path, buffer_address: str | None = None, buffer_size: int = 0, buffer_path: Path | None = None) -> None:
-    lines = [f"Device {chip}", "Si SWD", "Speed 4000", "Connect"]
+    device_token = jlink_device_token(chip)
+    wait_token = jlink_size_token(wait_ms, "JLink sleep duration", 60000)
+    rtt_address_token = jlink_address_token(rtt_address, "RTT control block address")
+    if int(rtt_address_token, 16) == 0:
+        raise ValueError("RTT control block address cannot be zero")
+    cb_path_token = jlink_script_path(cb_path, "RTT control block output path")
+    lines = [f"Device {device_token}", "Si SWD", "Speed 4000", "Connect"]
     if reset:
         lines.append("r")
-    lines.extend(["g", f"Sleep {wait_ms}", "h", f"SaveBin {cb_path} {rtt_address} 0xA8"])
+    lines.extend(["g", f"Sleep {wait_token}", "h", f"SaveBin {cb_path_token} {rtt_address_token} 0xA8"])
     if buffer_address and buffer_size > 0 and buffer_path:
-        lines.append(f"SaveBin {buffer_path} {buffer_address} {buffer_size}")
-    lines.extend([f"mem32 {rtt_address}, 0x10", "q"])
+        buffer_address_token = jlink_address_token(buffer_address, "RTT buffer address")
+        if int(buffer_address_token, 16) == 0:
+            raise ValueError("RTT buffer address cannot be zero")
+        buffer_size_token = jlink_size_token(buffer_size, "RTT buffer size", 1024 * 1024)
+        buffer_path_token = jlink_script_path(buffer_path, "RTT buffer output path")
+        lines.append(f"SaveBin {buffer_path_token} {buffer_address_token} {buffer_size_token}")
+    lines.extend([f"mem32 {rtt_address_token}, 0x10", "q"])
     path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
 
 
@@ -140,9 +151,16 @@ def main(argv: list[str] | None = None) -> int:
             return emit(failure(operation, 127, f"{name} not found", log=str(log), workspace=str(workspace)), args.Json)
     assert uv4 and jlink and fromelf
 
-    root = ET.parse(project).getroot()
+    try:
+        root = ET.parse(project).getroot()
+    except (OSError, ET.ParseError) as exc:
+        return emit(failure(operation, 2, f"Invalid MDK project XML: {exc}", log=str(log)), args.Json)
     device = next((node.text or "" for node in root.iter() if node.tag.endswith("Device")), "")
-    chip = device.split(":", 1)[0]
+    try:
+        device = strict_single_line(device, "Keil Device", 256)
+        chip = jlink_device_token(device.split(":", 1)[0])
+    except ValueError as exc:
+        return emit(failure(operation, 2, str(exc), log=str(log)), args.Json)
     output_name = next((node.text or "" for node in root.iter() if node.tag.endswith("OutputName")), "application") or "application"
     output_directory = next((node.text or "" for node in root.iter() if node.tag.endswith("OutputDirectory")), ".\\Objects\\") or ".\\Objects\\"
     output_dir = Path(output_directory)
@@ -156,10 +174,18 @@ def main(argv: list[str] | None = None) -> int:
     symbol = find_rtt_symbol(mdk, axf, fromelf, run_dir)
     if not symbol["ok"]:
         return emit(failure(operation, 4, "RTT symbol _SEGGER_RTT not found", log=str(log), symbol_log=symbol["path"]), args.Json)
-    address = symbol["address"]
+    try:
+        address = jlink_address_token(symbol["address"], "RTT symbol address")
+        if int(address, 16) == 0:
+            raise ValueError("RTT symbol address cannot be zero")
+    except (TypeError, ValueError) as exc:
+        return emit(failure(operation, 4, str(exc), log=str(log), symbol_log=symbol["path"]), args.Json)
 
     probe_script, probe_cb, probe_log = run_dir / "jlink-rtt-probe.jlink", run_dir / "rtt-cb-probe.bin", run_dir / "jlink-rtt-probe.log"
-    write_jlink_script(probe_script, chip, 2000, args.Reset, address, probe_cb)
+    try:
+        write_jlink_script(probe_script, chip, 2000, args.Reset, address, probe_cb)
+    except ValueError as exc:
+        return emit(failure(operation, 2, str(exc), log=str(log)), args.Json)
     run_logged([str(jlink), "-CommandFile", str(probe_script)], probe_log)
     probe = parse_control_block(probe_cb)
     if not probe or not probe["valid"]:
@@ -167,7 +193,10 @@ def main(argv: list[str] | None = None) -> int:
 
     capture_script, capture_cb = run_dir / "jlink-rtt-capture.jlink", run_dir / "rtt-cb.bin"
     buffer_path, jlink_log = run_dir / "rtt-buffer.bin", run_dir / "jlink-rtt-capture.log"
-    write_jlink_script(capture_script, chip, wait_ms, args.Reset, address, capture_cb, probe["buffer_address"], probe["buffer_size"], buffer_path)
+    try:
+        write_jlink_script(capture_script, chip, wait_ms, args.Reset, address, capture_cb, probe["buffer_address"], probe["buffer_size"], buffer_path)
+    except ValueError as exc:
+        return emit(failure(operation, 2, str(exc), log=str(log)), args.Json)
     run_logged([str(jlink), "-CommandFile", str(capture_script)], jlink_log)
     capture = parse_control_block(capture_cb)
     if not capture or not capture["valid"]:

@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.schema.json",
+  "title": "Embedded Capability Contract v1 common types",
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "capability_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["L0", "L1", "L2", "L3", "L4"]
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "runtime_id": {"type": "string", "minLength": 1},
+        "adapter_id": {"type": "string", "minLength": 1},
+        "project_id": {"type": "string", "minLength": 1},
+        "background_id": {"type": "string", "minLength": 1},
+        "workspace": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "source_revision": {"type": "string", "minLength": 1},
+        "device_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "gate": {
+      "type": "object",
+      "required": ["id", "level", "decision", "confirmation_required", "confirmed"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "level": {"$ref": "#/$defs/risk_level"},
+        "decision": {
+          "type": "string",
+          "enum": ["not_required", "allowed", "approval_required", "denied"]
+        },
+        "confirmation_required": {"type": "boolean"},
+        "confirmed": {"type": "boolean"},
+        "approval_id": {"type": ["string", "null"]},
+        "scope_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "policy_tags": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "category", "message", "retryable"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "category": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "authorization",
+            "policy",
+            "precondition",
+            "conflict",
+            "availability",
+            "transport",
+            "timeout",
+            "execution",
+            "integrity",
+            "canceled",
+            "internal"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "next_hint": {"type": "string", "minLength": 1},
+        "details": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "evidence_ref": {
+      "type": "object",
+      "required": ["id", "kind", "locator", "verified"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": ["command", "log", "artifact", "marker", "test", "device_observation", "diagnostic"]
+        },
+        "locator": {
+          "type": "object",
+          "required": ["scheme", "value"],
+          "properties": {
+            "scheme": {"type": "string", "enum": ["runtime-state", "workspace", "job", "url"]},
+            "value": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 0},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "verified": {"type": "boolean"},
+        "claims": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "retention": {"type": "string", "enum": ["managed_copy", "metadata_only"]}
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "required": ["id", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]},
+        "message": {"type": "string"},
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence_ref"}
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

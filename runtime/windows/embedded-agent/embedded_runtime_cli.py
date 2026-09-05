@@ -15,20 +15,17 @@ from embedded_runtime_common import (
     DEFAULT_AGENTCTL,
     DEFAULT_GIT_BYTES,
     DEFAULT_GIT_TIMEOUT,
-    DEFAULT_JENKINS_CONFIG,
-    DEFAULT_JENKINS_SERVER,
     DEFAULT_LOG_IMPORT_MAX_BYTES,
     DEFAULT_LOG_QUERY_BYTES,
     DEFAULT_READ_BYTES,
     DEFAULT_ROOT,
-    DEFAULT_SDK_LOCK,
     DEFAULT_SDK_MANAGER,
-    DEFAULT_SDK_STORE,
     DEFAULT_TAIL_BYTES,
     DEFAULT_TOOL_SEARCH_BYTES,
-    DEFAULT_WORKSPACE_ROOT,
+    print_result,
+    result,
+    safe_project_id,
 )
-from embedded_runtime_aboot import DEFAULT_ABOOT_ROOT, DEFAULT_FIRMWARE_ROOT
 from embedded_runtime_device import command_device
 from embedded_runtime_diagnose import command_diagnose
 from embedded_runtime_can import command_can
@@ -36,7 +33,7 @@ from embedded_runtime_git import command_git
 from embedded_runtime_jenkins import command_artifact, command_jenkins, command_job
 from embedded_runtime_knowledge import command_knowledge, command_project, command_status
 from embedded_runtime_operations import command_build, command_flash, command_log, command_rtt
-from embedded_runtime_sdk import command_sdk, command_workspace
+from embedded_runtime_sdk import command_sdk
 from embedded_runtime_tools import command_tool
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,8 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     process_stop.set_defaults(func=command_diagnose)
 
     jenkins = sub.add_parser("jenkins")
-    jenkins.add_argument("--server", default=DEFAULT_JENKINS_SERVER)
-    jenkins.add_argument("--config", type=Path, default=DEFAULT_JENKINS_CONFIG)
+    jenkins.add_argument("--connection-id", required=True)
     jenkins.add_argument("--timeout", type=int, default=20)
     jenkins_sub = jenkins.add_subparsers(dest="jenkins_action", required=True)
     jenkins_auth = jenkins_sub.add_parser("auth-check")
@@ -125,11 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     jenkins_build.set_defaults(func=command_jenkins)
 
     artifact = sub.add_parser("artifact")
-    artifact.add_argument("--server")
-    artifact.add_argument("--config", type=Path, default=DEFAULT_JENKINS_CONFIG)
     artifact.add_argument("--timeout", type=int, default=300)
     artifact_sub = artifact.add_subparsers(dest="artifact_action", required=True)
     artifact_download = artifact_sub.add_parser("download")
+    artifact_download.add_argument("--connection-id", required=True)
     artifact_download.add_argument("--project", required=True)
     artifact_download.add_argument("--url", required=True)
     artifact_download.add_argument("--to", required=True)
@@ -147,10 +142,6 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_show = knowledge_sub.add_parser("show")
     knowledge_show.add_argument("--project", required=True)
     knowledge_show.set_defaults(func=command_knowledge)
-    knowledge_export = knowledge_sub.add_parser("export")
-    knowledge_export.add_argument("--project", required=True)
-    knowledge_export.add_argument("--to", required=True)
-    knowledge_export.set_defaults(func=command_knowledge)
 
     tool = sub.add_parser("tool")
     tool_sub = tool.add_subparsers(dest="tool_action", required=True)
@@ -348,14 +339,12 @@ def build_parser() -> argparse.ArgumentParser:
     sdk_components_parser = sdk_sub.add_parser("components")
     sdk_components_parser.add_argument("--sdk", required=True)
     sdk_components_parser.add_argument("--component", default=".")
-    sdk_components_parser.add_argument("--sdk-store", type=Path, default=DEFAULT_SDK_STORE)
     sdk_components_parser.add_argument("--max-entries", type=int, default=200)
     sdk_components_parser.set_defaults(func=command_sdk)
 
     for sdk_action in ("project-resolve", "project-pull"):
         sdk_project_parser = sdk_sub.add_parser(sdk_action)
         sdk_project_parser.add_argument("--project", required=True)
-        sdk_project_parser.add_argument("--workspace")
         sdk_project_parser.add_argument("--ci-dir")
         sdk_project_parser.add_argument("--query")
         sdk_project_parser.add_argument("--sdk-name")
@@ -369,27 +358,15 @@ def build_parser() -> argparse.ArgumentParser:
     for sdk_action in ("materialize", "check-mapping"):
         sdk_mapping_parser = sdk_sub.add_parser(sdk_action)
         sdk_mapping_parser.add_argument("--project", required=True)
-        sdk_mapping_parser.add_argument("--workspace")
         sdk_mapping_parser.add_argument("--sdk", required=True)
         sdk_mapping_parser.add_argument("--component", required=True)
         sdk_mapping_parser.add_argument("--to", required=True)
         sdk_mapping_parser.add_argument("--mode", choices=["junction", "copy"], default="junction")
         sdk_mapping_parser.add_argument("--confirm", action="store_true")
         sdk_mapping_parser.add_argument("--replace-managed", action="store_true")
-        sdk_mapping_parser.add_argument("--sdk-store", type=Path, default=DEFAULT_SDK_STORE)
-        sdk_mapping_parser.add_argument("--sdk-lock", type=Path, default=DEFAULT_SDK_LOCK)
         sdk_mapping_parser.add_argument("--timeout", type=int, default=1800)
         sdk_mapping_parser.add_argument("--max-bytes", type=int, default=DEFAULT_GIT_BYTES)
         sdk_mapping_parser.set_defaults(func=command_sdk)
-
-    workspace = sub.add_parser("workspace")
-    workspace_sub = workspace.add_subparsers(dest="workspace_action", required=True)
-    workspace_remove = workspace_sub.add_parser("remove")
-    workspace_remove.add_argument("--project", required=True)
-    workspace_remove.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE_ROOT)
-    workspace_remove.add_argument("--allow-dirty", action="store_true")
-    workspace_remove.add_argument("--confirm", action="store_true")
-    workspace_remove.set_defaults(func=command_workspace)
 
     job = sub.add_parser("job")
     job_sub = job.add_subparsers(dest="job_action", required=True)
@@ -400,8 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     job_start.add_argument("--sdk-path")
     job_start.add_argument("--job", dest="jenkins_job")
     job_start.add_argument("--build", type=int)
-    job_start.add_argument("--server", default=DEFAULT_JENKINS_SERVER)
-    job_start.add_argument("--config", type=Path, default=DEFAULT_JENKINS_CONFIG)
+    job_start.add_argument("--connection-id")
     job_start.add_argument("--timeout", type=int, default=20)
     job_start.add_argument("--wait-timeout", type=int, default=2700)
     job_start.add_argument("--poll-interval", type=int, default=10)
@@ -558,14 +534,15 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--target", required=True, choices=["mcu"])
     capture.add_argument("--wait-ms", type=int, default=12000)
     capture.add_argument("--reset", action="store_true")
+    capture.add_argument("--require-confirm", action="store_true")
+    capture.add_argument("--confirm", action="store_true")
     capture.set_defaults(func=command_rtt)
 
     flash = sub.add_parser("flash")
     flash.add_argument("--project", required=True)
     flash.add_argument("--target", required=True, choices=["mcu", "mpu"])
     flash.add_argument("--package", type=Path)
-    flash.add_argument("--aboot-root", type=Path, default=DEFAULT_ABOOT_ROOT)
-    flash.add_argument("--firmware-root", type=Path, default=DEFAULT_FIRMWARE_ROOT)
+    flash.add_argument("--connection-id")
     flash.add_argument("--port", action="append", default=[])
     flash.add_argument("--usb-only", action="store_true")
     flash.add_argument("--auto-enable", action="store_true")
@@ -585,4 +562,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.json = json_requested or args.json
+    project = getattr(args, "project", None)
+    if project is not None:
+        try:
+            safe_project_id(project)
+        except ValueError as error:
+            print_result(
+                result(False, "request-validation", 2, first_failure=str(error)),
+                args.json,
+            )
+            return 2
     return args.func(args)

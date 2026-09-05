@@ -14,6 +14,7 @@ RUNTIME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME))
 
 import embedded_agent
+import embedded_runtime_sdk
 
 
 class SdkMappingTests(unittest.TestCase):
@@ -42,8 +43,6 @@ class SdkMappingTests(unittest.TestCase):
         )
 
         self.sdk_store = self.base / "sdk"
-        self.sdk_manager = self.base / "sdk_manager.py"
-        self.sdk_manager.write_text("# test stub\n", encoding="utf-8")
         self.version = self.sdk_store / "versions" / "test_sdk-1.0.0"
         self.source = self.version / "sdk" / "ac78428"
         self.source.mkdir(parents=True)
@@ -71,10 +70,12 @@ class SdkMappingTests(unittest.TestCase):
 
     def call(self, *arguments: str) -> tuple[int, dict]:
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            exit_code = embedded_agent.main(
-                ["--root", str(self.root), "--sdk-manager", str(self.sdk_manager), *arguments, "--json"]
-            )
+        with (
+            mock.patch.object(embedded_runtime_sdk, "DEFAULT_SDK_STORE", self.sdk_store),
+            mock.patch.object(embedded_runtime_sdk, "DEFAULT_SDK_LOCK", self.sdk_lock),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = embedded_agent.main(["--root", str(self.root), *arguments, "--json"])
         return exit_code, json.loads(output.getvalue())
 
     def mapping_args(self, action: str, *extra: str) -> list[str]:
@@ -91,10 +92,6 @@ class SdkMappingTests(unittest.TestCase):
             "mcu/sdk",
             "--mode",
             "junction",
-            "--sdk-store",
-            str(self.sdk_store),
-            "--sdk-lock",
-            str(self.sdk_lock),
             *extra,
         ]
 
@@ -135,6 +132,43 @@ class SdkMappingTests(unittest.TestCase):
         exit_code, value = self.call(*self.mapping_args("materialize", "--mode", "copy", "--confirm"))
         self.assertEqual(exit_code, 4)
         self.assertEqual(value["first_failure"], "SDK target already exists and is not an empty directory")
+
+    def test_materialize_rejects_reparse_ancestor_before_write(self) -> None:
+        external = self.base / "external"
+        external.mkdir()
+        linked_parent = self.workspace / "mcu" / "vendor"
+        linked_parent.symlink_to(external, target_is_directory=True)
+
+        for mode in ("copy", "junction"):
+            arguments = self.mapping_args("materialize", "--confirm")
+            arguments[arguments.index("mcu/sdk")] = "mcu/vendor/sdk"
+            arguments[arguments.index("junction")] = mode
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(embedded_runtime_sdk.shutil, "copytree") as copytree,
+                mock.patch.object(embedded_runtime_sdk.subprocess, "run") as run,
+            ):
+                exit_code, value = self.call(*arguments)
+                self.assertEqual(exit_code, 5)
+                self.assertEqual(value["unsafe_ancestor"], str(linked_parent))
+                self.assertEqual(
+                    value["first_failure"],
+                    "Path must not traverse a symlink or reparse point",
+                )
+                self.assertFalse((external / "sdk").exists())
+                copytree.assert_not_called()
+                run.assert_not_called()
+
+    def test_public_sdk_commands_reject_caller_selected_roots(self) -> None:
+        parser = embedded_agent.build_parser()
+        for arguments in (
+            ["sdk", "components", "--sdk", self.sdk, "--sdk-store", str(self.base)],
+            ["sdk", "project-resolve", "--project", self.project, "--workspace", str(self.base)],
+            [*self.mapping_args("check-mapping"), "--sdk-lock", str(self.base / "forged.lock")],
+        ):
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(arguments)
 
 
 if __name__ == "__main__":

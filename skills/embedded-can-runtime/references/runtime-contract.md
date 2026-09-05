@@ -14,6 +14,11 @@ embedded-agent can check-env --driver <driver> --json
 有限次 open/close，不初始化通道、不启动 CAN、不发送帧。检查 `ready`、`blockers`、DLL
 架构、Python 模块和厂商配置文件，不根据目录名判断驱动可用。
 
+真实 Driver Adapter 只读取 Runtime 安装根的机器配置 `can-drivers.json`。配置必须把
+driver 绑定到绝对、canonical、regular、非 symlink/reparse 的 DLL，可选绑定 SHA-256 和
+专用 Python。无有效配置时 capability unavailable。调用方不得从项目目录选择 DLL；兼容
+保留的 `--dll` 只有与机器配置中的受信路径完全一致时才会通过。
+
 ## 有限时监控
 
 ```bash

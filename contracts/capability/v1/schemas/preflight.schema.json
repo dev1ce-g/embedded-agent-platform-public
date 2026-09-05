@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "preflight.schema.json",
+  "title": "Embedded Capability Preflight v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "capability_id",
+    "capability_revision",
+    "preflight_id",
+    "input_digest",
+    "created_at",
+    "expires_at",
+    "state",
+    "context",
+    "checks",
+    "gate",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "embedded-capability-preflight/v1"},
+    "contract_version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$"},
+    "capability_id": {"$ref": "common.schema.json#/$defs/capability_id"},
+    "capability_revision": {"type": "string", "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$"},
+    "preflight_id": {"type": "string", "minLength": 1},
+    "input_digest": {"$ref": "common.schema.json#/$defs/sha256"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "expires_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "state": {"type": "string", "enum": ["ready", "approval_required", "blocked"]},
+    "context": {"$ref": "common.schema.json#/$defs/context"},
+    "checks": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/check"}
+    },
+    "gate": {"$ref": "common.schema.json#/$defs/gate"},
+    "error": {
+      "anyOf": [
+        {"$ref": "common.schema.json#/$defs/error"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "additionalProperties": false
+}

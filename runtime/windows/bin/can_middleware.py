@@ -7,18 +7,27 @@ configuration stay behind this seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import stat
 import subprocess
 import struct
 import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
-CAN_RUNTIME_ROOT = Path(os.environ.get("EMBEDDED_CAN_RUNTIME", str(Path(__file__).resolve().parent.parent / "can-runtime")))
+WINDOWS_RUNTIME_ROOT = Path(__file__).resolve().parent.parent
+CAN_RUNTIME_ROOT = WINDOWS_RUNTIME_ROOT / "can-runtime"
+DRIVER_CONFIG_PATH = WINDOWS_RUNTIME_ROOT / "can-drivers.json"
+DRIVER_CONFIG_SCHEMA = "embedded-can-driver-config/v1"
+MAX_DRIVER_CONFIG_BYTES = 64 * 1024
+SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}\Z")
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 CAN_SITE_PACKAGES = CAN_RUNTIME_ROOT / f"site-packages-{('x86' if struct.calcsize('P') == 4 else 'x64')}"
 CAN_LEGACY_SITE_PACKAGES = CAN_RUNTIME_ROOT / "site-packages"
 # Insert in reverse because each path is prepended. The architecture-specific
@@ -33,10 +42,9 @@ class DriverSpec:
     name: str
     adapter: str
     description: str
-    dll_candidates: tuple[str, ...]
+    requires_dll: bool
     required_modules: tuple[str, ...]
     default_device_model: str
-    runtime_candidates: tuple[str, ...]
 
 
 DRIVERS = {
@@ -44,34 +52,25 @@ DRIVERS = {
         name="controlcan",
         adapter="controlcan_dll",
         description="ZLG classic ControlCAN.dll Driver Adapter",
-        dll_candidates=(
-            os.environ.get("EMBEDDED_CONTROLCAN_DLL", ""),
-            str(Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "ZLG" / "ControlCAN.dll"),
-        ),
+        requires_dll=True,
         required_modules=("can",),
         default_device_model="4",
-        runtime_candidates=(os.environ.get("EMBEDDED_CAN_PYTHON", ""), sys.executable),
     ),
     "zcanpro": DriverSpec(
         name="zcanpro",
         adapter="zcanpro_dll",
         description="ZCANPro direct zlgcan.dll Driver Adapter",
-        dll_candidates=(
-            os.environ.get("EMBEDDED_ZCANPRO_DLL", ""),
-            str(Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "ZCANPRO" / "zlgcan.dll"),
-        ),
+        requires_dll=True,
         required_modules=("can",),
         default_device_model="ZCAN_USBCAN2",
-        runtime_candidates=(os.environ.get("EMBEDDED_CAN_PYTHON", ""), sys.executable),
     ),
     "virtual": DriverSpec(
         name="virtual",
         adapter="virtual",
         description="python-can in-memory Adapter for tests",
-        dll_candidates=(),
+        requires_dll=False,
         required_modules=("can",),
         default_device_model="virtual",
-        runtime_candidates=(sys.executable,),
     ),
 }
 
@@ -92,8 +91,131 @@ def pe_architecture(path: Path) -> str:
     return {0x014C: "x86", 0x8664: "x64", 0xAA64: "arm64"}.get(machine, f"0x{machine:04X}")
 
 
-def first_file(values: Iterable[str]) -> Path | None:
-    return next((Path(value) for value in values if Path(value).is_file()), None)
+class DriverTrustError(RuntimeError):
+    """Raised before native code is loaded when machine trust is incomplete."""
+
+
+def _is_symlink_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+
+
+def _canonical_regular_file(path: Path, label: str) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise DriverTrustError(f"{label} must be an absolute path")
+    lexical = Path(os.path.abspath(str(expanded)))
+    for component in (lexical, *lexical.parents):
+        if _is_symlink_or_reparse(component):
+            raise DriverTrustError(f"{label} must not use a symlink or reparse point: {component}")
+    try:
+        canonical = lexical.resolve(strict=True)
+        info = canonical.stat()
+    except OSError as exc:
+        raise DriverTrustError(f"{label} is unavailable: {lexical}: {exc}") from exc
+    if not _same_path(lexical, canonical):
+        raise DriverTrustError(f"{label} must already be canonical: {lexical}")
+    if not stat.S_ISREG(info.st_mode):
+        raise DriverTrustError(f"{label} must be a regular file: {canonical}")
+    return canonical
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _verify_hash(path: Path, expected: Any, label: str) -> tuple[str, bool]:
+    if expected is not None and (not isinstance(expected, str) or not SHA256_PATTERN.fullmatch(expected)):
+        raise DriverTrustError(f"{label} sha256 must be a full 64-character hexadecimal digest")
+    try:
+        actual = _sha256_file(path)
+    except OSError as exc:
+        raise DriverTrustError(f"{label} could not be hashed: {exc}") from exc
+    if expected is not None and actual.lower() != expected.lower():
+        raise DriverTrustError(f"{label} sha256 does not match the machine configuration")
+    return actual, expected is not None
+
+
+def load_driver_config() -> tuple[dict[str, Any], Path]:
+    """Load the fixed, Runtime-adjacent machine configuration.
+
+    No CLI or environment option can choose this file. That property is the
+    trust boundary between a task caller and the machine operator.
+    """
+
+    path = _canonical_regular_file(DRIVER_CONFIG_PATH, "CAN driver configuration")
+    if path.stat().st_size > MAX_DRIVER_CONFIG_BYTES:
+        raise DriverTrustError(f"CAN driver configuration exceeds {MAX_DRIVER_CONFIG_BYTES} bytes")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DriverTrustError(f"CAN driver configuration is invalid: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != DRIVER_CONFIG_SCHEMA:
+        raise DriverTrustError(f"CAN driver configuration schema must be {DRIVER_CONFIG_SCHEMA}")
+    if not isinstance(value.get("drivers"), dict):
+        raise DriverTrustError("CAN driver configuration must contain a drivers object")
+    return value, path
+
+
+def configured_driver(name: str) -> tuple[dict[str, Any], Path]:
+    if name not in DRIVERS:
+        raise DriverTrustError(f"Unknown CAN driver: {name}")
+    value, config_path = load_driver_config()
+    entry = value["drivers"].get(name)
+    if not isinstance(entry, dict):
+        raise DriverTrustError(f"CAN driver is not present in machine configuration: {name}")
+    return entry, config_path
+
+
+def require_trusted_driver_path(name: str, requested_path: str | Path | None = None) -> Path | None:
+    """Resolve a native DLL solely from the fixed machine configuration."""
+
+    if name not in DRIVERS:
+        raise DriverTrustError(f"Unknown CAN driver: {name}")
+    spec = DRIVERS[name]
+    if not spec.requires_dll:
+        if requested_path:
+            raise DriverTrustError(f"CAN driver {name} does not accept a DLL path")
+        return None
+    entry, _config_path = configured_driver(name)
+    configured = entry.get("dll")
+    if not isinstance(configured, str) or not configured.strip():
+        raise DriverTrustError(f"CAN driver machine configuration has no DLL path: {name}")
+    trusted = _canonical_regular_file(Path(configured), f"{name} driver DLL")
+    _verify_hash(trusted, entry.get("sha256"), f"{name} driver DLL")
+    if requested_path is not None:
+        requested = Path(requested_path).expanduser()
+        if not requested.is_absolute() or not _same_path(requested, trusted):
+            raise DriverTrustError(
+                f"Caller-provided DLL path is not allowed for {name}; use the machine-configured driver"
+            )
+    return trusted
+
+
+def require_trusted_runtime_path(name: str) -> Path:
+    if name == "virtual":
+        return Path(sys.executable).resolve()
+    entry, _config_path = configured_driver(name)
+    configured = entry.get("python")
+    if configured is None:
+        return Path(sys.executable).resolve()
+    if not isinstance(configured, str) or not configured.strip():
+        raise DriverTrustError(f"Configured Python path is invalid for CAN driver: {name}")
+    runtime = _canonical_regular_file(Path(configured), f"{name} Python runtime")
+    _verify_hash(runtime, entry.get("python_sha256"), f"{name} Python runtime")
+    return runtime
 
 
 def runtime_architecture(path: Path) -> str:
@@ -102,16 +224,12 @@ def runtime_architecture(path: Path) -> str:
     return pe_architecture(path)
 
 
-def select_runtime(spec: DriverSpec, dll_arch: str | None) -> tuple[Path | None, str | None]:
-    candidates = [Path(value) for value in spec.runtime_candidates if Path(value).is_file()]
-    if not candidates:
-        return None, None
-    if dll_arch in {"x86", "x64"}:
-        matched = next((path for path in candidates if runtime_architecture(path) == dll_arch), None)
-        if matched:
-            return matched, dll_arch
-    selected = candidates[0]
-    return selected, runtime_architecture(selected)
+def select_runtime(name: str) -> tuple[Path | None, str | None, str | None]:
+    try:
+        selected = require_trusted_runtime_path(name)
+    except DriverTrustError as exc:
+        return None, None, str(exc)
+    return selected, runtime_architecture(selected), None
 
 
 def runtime_modules(runtime: Path | None, runtime_arch: str | None, modules: tuple[str, ...]) -> dict[str, bool]:
@@ -156,15 +274,34 @@ def driver_inventory(name: str | None = None) -> list[dict[str, Any]]:
     selected = [DRIVERS[name]] if name else list(DRIVERS.values())
     values: list[dict[str, Any]] = []
     for spec in selected:
-        dll = first_file(spec.dll_candidates)
+        trust_error: str | None = None
+        config_path: str | None = None
+        dll: Path | None = None
+        dll_sha256: str | None = None
+        hash_required = False
+        if spec.requires_dll:
+            try:
+                entry, trusted_config = configured_driver(spec.name)
+                config_path = str(trusted_config)
+                dll = require_trusted_driver_path(spec.name)
+                assert dll is not None
+                try:
+                    dll_sha256 = _sha256_file(dll)
+                except OSError as exc:
+                    raise DriverTrustError(f"{spec.name} driver DLL could not be hashed: {exc}") from exc
+                hash_required = entry.get("sha256") is not None
+            except DriverTrustError as exc:
+                trust_error = str(exc)
         dll_arch = pe_architecture(dll) if dll else None
-        runtime, runtime_arch = select_runtime(spec, dll_arch)
+        runtime, runtime_arch, runtime_error = select_runtime(spec.name)
         modules = runtime_modules(runtime, runtime_arch, spec.required_modules)
         architecture_ok = dll_arch in {None, "unknown", runtime_arch}
-        ready = (dll is not None or not spec.dll_candidates) and all(modules.values()) and architecture_ok
+        ready = (dll is not None or not spec.requires_dll) and all(modules.values()) and architecture_ok and runtime_error is None
         blockers: list[str] = []
-        if spec.dll_candidates and dll is None:
-            blockers.append("driver DLL not found")
+        if trust_error:
+            blockers.append(trust_error)
+        if runtime_error and runtime_error != trust_error:
+            blockers.append(runtime_error)
         for module, available in modules.items():
             if not available:
                 blockers.append(f"Python module missing or failed to import: {module}")
@@ -183,7 +320,10 @@ def driver_inventory(name: str | None = None) -> list[dict[str, Any]]:
                 "python_arch": runtime_arch,
                 "dll": str(dll) if dll else None,
                 "dll_arch": dll_arch,
-                "dll_candidates": list(spec.dll_candidates),
+                "dll_sha256": dll_sha256,
+                "dll_hash_required": hash_required,
+                "driver_config": config_path or str(DRIVER_CONFIG_PATH),
+                "machine_configured": not spec.requires_dll or trust_error is None,
                 "required_modules": modules,
                 "default_device_model": spec.default_device_model,
                 "runtime_root": str(CAN_RUNTIME_ROOT),
@@ -194,10 +334,12 @@ def driver_inventory(name: str | None = None) -> list[dict[str, Any]]:
 
 
 def driver_runtime(name: str) -> str:
-    inventory = driver_inventory(name)[0]
-    if not inventory["python"]:
-        raise RuntimeError(f"No Python runtime found for CAN driver: {name}")
-    return str(inventory["python"])
+    if name not in DRIVERS:
+        raise RuntimeError(f"Unknown CAN driver: {name}")
+    if DRIVERS[name].requires_dll:
+        require_trusted_driver_path(name)
+    runtime = require_trusted_runtime_path(name)
+    return str(runtime)
 
 
 def _add_dll_directory(path: Path) -> Any | None:
@@ -340,10 +482,7 @@ def open_bus(
     if driver not in DRIVERS:
         raise ValueError(f"Unknown CAN driver: {driver}")
     spec = DRIVERS[driver]
-    inventory = driver_inventory(driver)[0]
-    selected_dll = Path(dll_path) if dll_path else (Path(inventory["dll"]) if inventory["dll"] else None)
-    if selected_dll and not selected_dll.is_file():
-        raise RuntimeError(f"CAN driver DLL not found: {selected_dll}")
+    selected_dll = require_trusted_driver_path(driver, dll_path)
     if selected_dll:
         dll_arch = pe_architecture(selected_dll)
         if dll_arch not in {"unknown", process_architecture()}:

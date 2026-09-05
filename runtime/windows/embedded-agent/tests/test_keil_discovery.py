@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
@@ -15,6 +16,8 @@ import sys
 sys.path.insert(0, str(RUNTIME_DIR))
 
 from embedded_runtime_common import infer_targets, parse_keil  # noqa: E402
+import embedded_runtime_common  # noqa: E402
+import embedded_runtime_knowledge  # noqa: E402
 from embedded_runtime_knowledge import command_project  # noqa: E402
 
 
@@ -133,7 +136,14 @@ class KeilDiscoveryTests(unittest.TestCase):
                     json=True,
                 )
                 output = StringIO()
-                with redirect_stdout(output):
+                with (
+                    mock.patch.object(
+                        embedded_runtime_common,
+                        "DEFAULT_WORKSPACE_ROOT",
+                        workspace.parent,
+                    ),
+                    redirect_stdout(output),
+                ):
                     exit_code = command_project(args)
                 return exit_code, json.loads(output.getvalue())
 
@@ -150,6 +160,43 @@ class KeilDiscoveryTests(unittest.TestCase):
         self.assertEqual(selected["selection_status"], "selected")
         self.assertEqual(reused["selection_status"], "selected")
         self.assertEqual(background["targets"]["mcu"]["build"]["selection_source"], "existing_background")
+
+    def test_discovery_rejects_workspace_outside_machine_root_before_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowed = root / "allowed"
+            outside = root / "outside"
+            allowed.mkdir()
+            outside.mkdir()
+            args = argparse.Namespace(
+                root=root / "runtime",
+                project_action="discover",
+                project="sample",
+                workspace=str(outside),
+                mcu_keil_project=None,
+                write_background=True,
+                json=True,
+            )
+            output = StringIO()
+            with (
+                mock.patch.object(
+                    embedded_runtime_common,
+                    "DEFAULT_WORKSPACE_ROOT",
+                    allowed,
+                ),
+                mock.patch.object(
+                    embedded_runtime_knowledge,
+                    "discover_background",
+                ) as discover,
+                redirect_stdout(output),
+            ):
+                exit_code = command_project(args)
+
+        value = json.loads(output.getvalue())
+        self.assertEqual(5, exit_code)
+        self.assertTrue(value["blocked"])
+        self.assertIn("configured workspace root", value["first_failure"])
+        discover.assert_not_called()
 
 
 if __name__ == "__main__":

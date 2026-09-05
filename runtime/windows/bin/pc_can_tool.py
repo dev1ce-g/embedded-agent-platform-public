@@ -817,7 +817,7 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--driver", choices=tuple(can_middleware.DRIVERS), default=os.environ.get("PC_CAN_DRIVER", "controlcan"))
     parser.add_argument("--channel", type=int, default=0)
     parser.add_argument("--bitrate", type=int, default=DEFAULT_BITRATE)
-    parser.add_argument("--dll", default=os.environ.get("CAN_DRIVER_DLL"))
+    parser.add_argument("--dll", help="deprecated; must exactly match the Runtime machine configuration")
     parser.add_argument("--device-model")
     parser.add_argument("--device-index", type=int, default=0)
 

@@ -31,8 +31,39 @@ class WindowsRuntimeInstallerTests(unittest.TestCase):
             self.assertTrue((prefix / "bin" / "embedded-agent.py").is_file())
             self.assertTrue((prefix / "embedded-agent" / "embedded_agent.py").is_file())
             self.assertTrue((prefix / "config.example.ps1").is_file())
+            self.assertTrue((prefix / "jenkins-connections.example.json").is_file())
+            self.assertTrue((prefix / "aboot-connections.example.json").is_file())
+            self.assertTrue((prefix / "can-runtime" / "can-drivers.example.json").is_file())
+            self.assertEqual(
+                (ROOT / "VERSION").read_text(encoding="utf-8"),
+                (prefix / "VERSION").read_text(encoding="utf-8"),
+            )
+            registry = json.loads((prefix / "jenkins-connections.example.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["schema_version"], "embedded-jenkins-connections/v1")
+            self.assertNotIn("password", json.dumps(registry).lower())
+            self.assertNotIn("token", json.dumps(registry).lower())
+            self.assertEqual(
+                result["jenkins_connections_example"],
+                str(prefix / "jenkins-connections.example.json"),
+            )
+            aboot_registry = json.loads(
+                (prefix / "aboot-connections.example.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                aboot_registry["schema_version"],
+                "embedded-aboot-connections/v1",
+            )
+            can_registry = json.loads(
+                (prefix / "can-runtime" / "can-drivers.example.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                can_registry["schema_version"],
+                "embedded-can-driver-config/v1",
+            )
 
-            environment["EMBEDDED_AGENT_ROOT"] = str(prefix / "state")
+            environment["EMBEDDED_AGENT_ROOT"] = str(prefix / "attacker-selected-state")
             status = subprocess.run(
                 [sys.executable, str(prefix / "bin" / "embedded-agent.py"), "status", "--json"],
                 text=True,
@@ -41,7 +72,13 @@ class WindowsRuntimeInstallerTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(0, status.returncode, status.stderr)
-            self.assertTrue(json.loads(status.stdout)["ok"])
+            status_value = json.loads(status.stdout)
+            self.assertTrue(status_value["ok"])
+            self.assertEqual(status_value["root"], str((prefix / "state").resolve()))
+            self.assertEqual(
+                status_value["platform_version"],
+                (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+            )
 
 
 if __name__ == "__main__":

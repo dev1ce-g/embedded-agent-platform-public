@@ -9,6 +9,32 @@ from pathlib import Path
 from agent_backend_common import *
 
 
+def probe_commands(
+    device: str,
+    interface: str,
+    speed: str,
+    halt: bool,
+    reset_before_halt: bool,
+) -> tuple[list[str], dict[str, str]]:
+    normalized = {
+        "device": jlink_device_token(device),
+        "interface": jlink_interface_token(interface),
+        "speed": jlink_speed_token(speed),
+    }
+    commands = [
+        f"device {normalized['device']}",
+        f"si {normalized['interface']}",
+        f"speed {normalized['speed']}",
+        "connect",
+    ]
+    if reset_before_halt:
+        commands.append("r")
+    if halt or reset_before_halt:
+        commands.append("h")
+    commands.extend(["mem32 0xE000ED00 1", "exit"])
+    return commands, normalized
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     default_jlink = os.environ.get("AGENTCTL_JLINK_PATH") or shutil.which("JLink.exe") or str(
@@ -33,13 +59,17 @@ def main(argv: list[str] | None = None) -> int:
         write_log(log, f"JLink not found: {jlink}")
         return emit(failure(operation, 127, f"JLink not found: {jlink}", log=str(log)), args.Json)
 
-    commands = [f"device {args.Device}", f"si {args.Interface}", f"speed {args.Speed}", "connect"]
-    if args.ResetBeforeHalt:
-        commands.append("r")
-    if args.Halt or args.ResetBeforeHalt:
-        commands.append("h")
-    commands.extend(["mem32 0xE000ED00 1", "exit"])
-    command_file.write_text("\n".join(commands) + "\n", encoding="ascii")
+    try:
+        commands, normalized = probe_commands(
+            args.Device,
+            args.Interface,
+            args.Speed,
+            args.Halt,
+            args.ResetBeforeHalt,
+        )
+    except ValueError as exc:
+        return emit(failure(operation, 2, str(exc), log=str(log)), args.Json)
+    command_file.write_text("\n".join(commands) + "\n", encoding="utf-8")
     exit_code, _, _ = run_logged(
         [str(jlink), "-CommanderScript", str(command_file)],
         log,
@@ -55,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     ok = exit_code == 0 and bool(success) and not failed
     if not ok and exit_code == 0:
         exit_code = 1
-    return emit(result(ok, operation, exit_code, device=args.Device, interface=args.Interface, speed=args.Speed, halt_requested=args.Halt or args.ResetBeforeHalt, reset_before_halt=args.ResetBeforeHalt, started_at=started, ended_at=now_iso(), log=str(log), error_log=str(error_log), command_file=str(command_file), success_marker=success, halt_marker=halt, first_failure=failed or (None if ok else "Missing JLink connection evidence")), args.Json)
+    return emit(result(ok, operation, exit_code, **normalized, halt_requested=args.Halt or args.ResetBeforeHalt, reset_before_halt=args.ResetBeforeHalt, started_at=started, ended_at=now_iso(), log=str(log), error_log=str(error_log), command_file=str(command_file), success_marker=success, halt_marker=halt, first_failure=failed or (None if ok else "Missing JLink connection evidence")), args.Json)
 
 
 if __name__ == "__main__":

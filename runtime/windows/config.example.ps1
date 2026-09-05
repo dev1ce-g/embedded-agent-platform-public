@@ -6,15 +6,16 @@ $env:AGENTCTL_JLINK_PATH = 'C:\Program Files\SEGGER\JLink\JLink.exe'
 $env:EMBEDDED_AGENT_WORKSPACE_ROOT = "$env:LOCALAPPDATA\EmbeddedAgentPlatform\workspaces"
 
 # Optional integrations:
-# $env:EMBEDDED_JENKINS_SERVER = 'https://jenkins.example.com'
-# $env:EMBEDDED_JENKINS_CONFIG = "$env:USERPROFILE\.config\embedded-agent\jenkins.json"
-# $env:EMBEDDED_SDK_MANAGER = 'C:\Tools\sdk_manager.py'
+# Jenkins endpoints and credential files are bound in the machine-owned
+# jenkins-connections.json next to embedded-agent.cmd. Its path is not selected
+# through task environment or CLI input; callers choose only a connection id.
 # $env:EMBEDDED_SDK_STORE = 'C:\SDKs'
-# $env:EMBEDDED_ABOOT_ROOT = 'C:\Tools\aboot'
-# $env:EMBEDDED_FIRMWARE_ROOT = 'C:\Firmware'
-# $env:EMBEDDED_CONTROLCAN_DLL = 'C:\Program Files\ZLG\ControlCAN.dll'
-# $env:EMBEDDED_ZCANPRO_DLL = 'C:\Program Files\ZCANPRO\zlgcan.dll'
-# $env:EMBEDDED_CAN_PYTHON = 'C:\Path\To\python.exe'
+# Aboot tool and firmware roots are not task environment settings. Copy
+# aboot-connections.example.json to aboot-connections.json next to
+# embedded-agent.cmd and pin adownload.exe with its SHA-256.
+# CAN vendor DLLs are intentionally not configurable through task environment
+# variables. Copy can-runtime\can-drivers.example.json to can-drivers.json next
+# to embedded-agent.cmd, then edit that machine-owned file.
 # $env:AGENTCTL_MPU_CONTAINER = 'embedded-build'
 # $env:AGENTCTL_MPU_WORKDIR = '/home/project/mpu/project/cmake'
 # $env:AGENTCTL_MPU_SDK_PATH = '/home/ql-sdk'

@@ -26,12 +26,14 @@ class DeviceProxyTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name) / "agent"
+        self.workspace = self.root.parent / "workspace"
+        self.workspace.mkdir()
         project_dir = self.root / "projects" / self.project
         project_dir.mkdir(parents=True)
         background = {
             "project_id": self.project,
             "background_id": "bg-1",
-            "workspace": "C:\\Workspaces\\demo",
+            "workspace": str(self.workspace),
         }
         (project_dir / "background.json").write_text(json.dumps(background), encoding="utf-8")
 

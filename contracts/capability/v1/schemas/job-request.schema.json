@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "job-request.schema.json",
+  "title": "Embedded Runtime Job Request v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "job_id",
+    "project_id",
+    "background_id",
+    "kind",
+    "operation_key",
+    "parameters"
+  ],
+  "properties": {
+    "schema_version": {"const": "embedded-runtime-job-request/v2"},
+    "job_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,126}[A-Za-z0-9_-])?$"
+    },
+    "background_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "kind": {"enum": ["build", "jenkins-wait"]},
+    "operation_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "parameters": {"type": "object"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {"const": "build"},
+        "parameters": {"$ref": "#/$defs/build_parameters"}
+      }
+    },
+    {
+      "properties": {
+        "kind": {"const": "jenkins-wait"},
+        "parameters": {"$ref": "#/$defs/jenkins_wait_parameters"}
+      }
+    }
+  ],
+  "$defs": {
+    "build_parameters": {
+      "type": "object",
+      "required": ["target"],
+      "properties": {
+        "target": {"enum": ["keil", "mpu"]},
+        "sdk_path": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": false
+    },
+    "jenkins_wait_parameters": {
+      "type": "object",
+      "required": [
+        "connection_id",
+        "timeout",
+        "job",
+        "build",
+        "wait_timeout",
+        "poll_interval",
+        "max_chars"
+      ],
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "job": {"type": "string", "minLength": 1, "maxLength": 512},
+        "build": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "wait_timeout": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "poll_interval": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "max_chars": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

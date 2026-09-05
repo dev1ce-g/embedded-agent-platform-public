@@ -6,17 +6,14 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
-import os
 import struct
 from pathlib import Path
 from typing import Any
 
+from can_middleware import DRIVER_CONFIG_PATH, DriverTrustError, require_trusted_driver_path
 from zcanpro_dll import ZCanDeviceInfo, _valid_handle, bind_library, load_library
 
 
-DEFAULT_DLL = os.environ.get("EMBEDDED_ZCANPRO_DLL") or str(
-    Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "ZCANPRO" / "zlgcan.dll"
-)
 DEFAULT_TYPES = (3, 4, 20, 21, 31, 34, 38, 39, 40, 41, 42, 43, 59, 60, 61, 62, 63, 76, 82, 83, 84, 85)
 
 
@@ -37,6 +34,9 @@ def csv_integers(value: str) -> list[int]:
 
 
 def probe(path: Path, device_types: list[int], indexes: list[int]) -> list[dict[str, Any]]:
+    trusted = require_trusted_driver_path("zcanpro", path)
+    assert trusted is not None
+    path = trusted
     required = pe_machine(path)
     actual = "x86" if struct.calcsize("P") == 4 else "x64"
     if required in {"x86", "x64"} and required != actual:
@@ -83,12 +83,28 @@ def probe(path: Path, device_types: list[int], indexes: list[int]) -> list[dict[
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("discover",), nargs="?", default="discover")
-    parser.add_argument("-Dll", default=DEFAULT_DLL)
+    parser.add_argument("-Dll")
     parser.add_argument("-DevTypes", default=",".join(map(str, DEFAULT_TYPES)))
     parser.add_argument("-DevIndexes", default="0,1,2")
     parser.add_argument("-Json", action="store_true")
     args = parser.parse_args(argv)
-    path = Path(args.Dll)
+    try:
+        trusted = require_trusted_driver_path("zcanpro", args.Dll)
+        assert trusted is not None
+    except DriverTrustError as exc:
+        value = {
+            "ok": False,
+            "operation": "probe-zcanpro",
+            "exit_code": 2,
+            "mode": args.mode,
+            "driver_config": str(DRIVER_CONFIG_PATH),
+            "inventory": [],
+            "results": [],
+            "first_failure": str(exc),
+        }
+        print(json.dumps(value, ensure_ascii=False, separators=(",", ":") if args.Json else None, indent=None if args.Json else 2))
+        return 2
+    path = trusted
     inventory = [{"path": str(path), "exists": path.is_file(), "arch": pe_machine(path) if path.is_file() else None}]
     results = probe(path, csv_integers(args.DevTypes), csv_integers(args.DevIndexes)) if path.is_file() else []
     probe_ok = bool(results) and not any("error" in item for item in results)

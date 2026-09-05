@@ -8,7 +8,7 @@ ID filters, structured results and separate observe/send operations. Upstream sc
 
 The platform-specific design keeps vendor drivers behind the Windows Runtime Interface, requires an L3 gate
 for transmit and UDS operations, does not persist an automatically detected adapter, and publishes only commands
-implemented by Runtime contract `0.8.0`.
+implemented by Runtime contract `1.0.0`.
 
 Sources:
 

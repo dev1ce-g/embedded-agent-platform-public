@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution.schema.json",
+  "title": "Embedded Capability Execution v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "capability_id",
+    "capability_revision",
+    "execution_id",
+    "input_digest",
+    "created_at",
+    "state",
+    "ok",
+    "exit_code",
+    "context",
+    "gate",
+    "result",
+    "evidence",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "embedded-capability-execution/v1"},
+    "contract_version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$"},
+    "capability_id": {"$ref": "common.schema.json#/$defs/capability_id"},
+    "capability_revision": {"type": "string", "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$"},
+    "execution_id": {"type": "string", "minLength": 1},
+    "request_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "preflight_id": {"type": "string", "minLength": 1},
+    "job_id": {"type": "string", "minLength": 1},
+    "receipt_id": {"type": "string", "minLength": 1},
+    "input_digest": {"$ref": "common.schema.json#/$defs/sha256"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "finished_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "state": {
+      "type": "string",
+      "enum": ["accepted", "queued", "running", "succeeded", "failed", "blocked", "canceled"]
+    },
+    "ok": {"type": "boolean"},
+    "exit_code": {"type": "integer"},
+    "context": {"$ref": "common.schema.json#/$defs/context"},
+    "gate": {"$ref": "common.schema.json#/$defs/gate"},
+    "result": {"type": "object"},
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/evidence_ref"}
+    },
+    "error": {
+      "anyOf": [
+        {"$ref": "common.schema.json#/$defs/error"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "additionalProperties": false
+}

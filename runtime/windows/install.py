@@ -12,7 +12,9 @@ from pathlib import Path
 
 
 SOURCE_ROOT = Path(__file__).resolve().parent
+PLATFORM_VERSION_SOURCE = SOURCE_ROOT.parents[1] / "VERSION"
 MANAGED_DIRECTORIES = ("bin", "embedded-agent", "can-runtime")
+OBSOLETE_MANAGED_FILES = ("bin/claude-start.py",)
 
 
 def default_prefix() -> Path:
@@ -33,11 +35,18 @@ def copy_runtime(prefix: Path) -> list[str]:
         )
         written.append(str(destination))
 
+    # copytree updates managed directories in place. Remove exact files retired
+    # by newer releases so upgrades cannot leave an old model-specific entry
+    # point executable on the host.
+    for relative in OBSOLETE_MANAGED_FILES:
+        obsolete = prefix / relative
+        if obsolete.is_file() or obsolete.is_symlink():
+            obsolete.unlink()
+
     launcher = prefix / "embedded-agent.cmd"
     launcher.write_text(
         "@echo off\r\n"
         "setlocal\r\n"
-        'set "EMBEDDED_AGENT_ROOT=%~dp0state"\r\n'
         f'"{sys.executable}" "%~dp0bin\\embedded-agent.py" %*\r\n',
         encoding="utf-8",
     )
@@ -46,6 +55,15 @@ def copy_runtime(prefix: Path) -> list[str]:
     config = prefix / "config.example.ps1"
     shutil.copy2(SOURCE_ROOT / "config.example.ps1", config)
     written.append(str(config))
+    connections_example = prefix / "jenkins-connections.example.json"
+    shutil.copy2(SOURCE_ROOT / "jenkins-connections.example.json", connections_example)
+    written.append(str(connections_example))
+    aboot_connections_example = prefix / "aboot-connections.example.json"
+    shutil.copy2(SOURCE_ROOT / "aboot-connections.example.json", aboot_connections_example)
+    written.append(str(aboot_connections_example))
+    version_file = prefix / "VERSION"
+    shutil.copy2(PLATFORM_VERSION_SOURCE, version_file)
+    written.append(str(version_file))
     (prefix / "state").mkdir(parents=True, exist_ok=True)
     return written
 
@@ -68,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         "prefix": str(prefix),
         "launcher": str(prefix / "embedded-agent.cmd"),
         "config_example": str(prefix / "config.example.ps1"),
+        "jenkins_connections_example": str(prefix / "jenkins-connections.example.json"),
+        "aboot_connections_example": str(prefix / "aboot-connections.example.json"),
         "written": written,
     }
     print(json.dumps(result, ensure_ascii=args.json, separators=(",", ":") if args.json else None, indent=None if args.json else 2))

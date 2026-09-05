@@ -16,6 +16,8 @@ import sys
 import time
 from ctypes import POINTER, Structure, byref, c_ubyte, c_uint
 
+from can_middleware import require_trusted_driver_path
+
 
 STATUS_OK = 1
 MAX_CAN_OBJ = 2500
@@ -95,18 +97,20 @@ def format_hex(data: bytes) -> str:
 
 
 class ControlCan:
-    def __init__(self, dll_path: str, dev_type: int, dev_index: int, can_index: int):
-        self.dll_path = dll_path
+    def __init__(self, dll_path: str | None, dev_type: int, dev_index: int, can_index: int):
+        trusted = require_trusted_driver_path("controlcan", dll_path)
+        assert trusted is not None
+        self.dll_path = str(trusted)
         self.dev_type = dev_type
         self.dev_index = dev_index
         self.can_index = can_index
         self.dll_dirs = []
         try:
-            self._add_dll_search_dirs(dll_path)
-            self.dll = ctypes.WinDLL(dll_path)
+            self._add_dll_search_dirs(self.dll_path)
+            self.dll = ctypes.WinDLL(self.dll_path)
         except OSError as exc:
             raise RuntimeError(
-                f"failed to load {dll_path}: {exc}. "
+                f"failed to load {self.dll_path}: {exc}. "
                 "Check 32/64-bit Python and ControlCAN.dll architecture."
             ) from exc
         self._bind()
@@ -362,20 +366,9 @@ class UdsResponder:
         return bytes([0x7F, sid, 0x11])
 
 
-def default_dll_path() -> str:
-    candidates = [
-        os.environ.get("EMBEDDED_CONTROLCAN_DLL", ""),
-        str(Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "ZLG" / "ControlCAN.dll"),
-    ]
-    for item in candidates:
-        if item and os.path.exists(item):
-            return item
-    return next((item for item in candidates if item), "ControlCAN.dll")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ZLG ControlCAN UDS ECU simulator")
-    parser.add_argument("--dll", default=default_dll_path(), help="ControlCAN.dll path")
+    parser.add_argument("--dll", help="deprecated; must exactly match the machine-configured DLL")
     parser.add_argument("--dev-type", default="17", type=parse_dev_type, help="device type name/id, default 17 CANET-TCP")
     parser.add_argument("--dev-index", default=0, type=parse_int, help="device index, default 0")
     parser.add_argument("--can-index", default=0, type=parse_int, help="CAN channel index in adapter, default 0")
@@ -407,7 +400,11 @@ def main() -> int:
         print("--padding must be 0..255", file=sys.stderr)
         return 2
 
-    can = ControlCan(args.dll, args.dev_type, args.dev_index, args.can_index)
+    try:
+        can = ControlCan(args.dll, args.dev_type, args.dev_index, args.can_index)
+    except RuntimeError as exc:
+        print(f"pc_uds_ecu_sim: error: {exc}", file=sys.stderr)
+        return 2
     ecu = IsoTpEcu(
         can=can,
         rxid=args.rxid,

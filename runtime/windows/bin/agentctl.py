@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,11 +21,10 @@ AGENT_HOME = Path(os.environ.get("EMBEDDED_AGENT_HOME", str(SOURCE_HOME))).resol
 RUNTIME_DIR = SOURCE_HOME / "embedded-agent"
 sys.path.insert(0, str(RUNTIME_DIR))
 
-from embedded_runtime_common import decode_text, now_iso, result, sha256_file  # noqa: E402
+from embedded_runtime_common import decode_text, iter_tool_files, result, sha256_file  # noqa: E402
 
 
 LOG_DIR = AGENT_HOME / "logs"
-SESSION_DIR = AGENT_HOME / "sessions"
 
 
 def option(arguments: list[str], name: str, default: str | None = None) -> str | None:
@@ -39,10 +37,6 @@ def option(arguments: list[str], name: str, default: str | None = None) -> str |
 
 def flag(arguments: list[str], name: str) -> bool:
     return name in arguments
-
-
-def safe_task_id(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or "unknown-task"
 
 
 def emit(value: dict[str, Any], as_json: bool) -> int:
@@ -88,73 +82,12 @@ def run_adapter(script_name: str, parameters: list[str], as_json: bool) -> int:
     return completed.returncode
 
 
-def session_file(task: str) -> Path:
-    return SESSION_DIR / f"{safe_task_id(task)}.json"
-
-
-def read_session(task: str) -> dict[str, Any] | None:
-    try:
-        value = json.loads(session_file(task).read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def write_session(task: str, value: dict[str, Any]) -> Path:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    path = session_file(task)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
-    return path
-
-
-def command_session(arguments: list[str], as_json: bool) -> int:
-    if len(arguments) < 2:
-        return emit(failure("session", 2, "Missing session action"), as_json)
-    action = arguments[1]
-    task = option(arguments, "--task")
-    if not task:
-        return emit(failure(f"session-{action}", 2, "Missing --task"), as_json)
-    current = read_session(task) or {
-        "ok": True,
-        "task": task,
-        "role": option(arguments, "--role", "execution"),
-        "started_at": None,
-    }
-    if action == "start":
-        workspace = option(arguments, "--workspace")
-        if not workspace:
-            return emit(failure("session-start", 2, "Missing --workspace"), as_json)
-        current.update(
-            operation="session-start",
-            workspace=workspace,
-            role=option(arguments, "--role", "execution"),
-            status="running",
-            started_at=now_iso(),
-            updated_at=now_iso(),
-        )
-    elif action == "handoff":
-        current.update(
-            operation="session-handoff",
-            status="handoff",
-            handoff_file=option(arguments, "--summary"),
-            updated_at=now_iso(),
-        )
-    elif action == "stop":
-        current.update(operation="session-stop", status="stopped", ended_at=now_iso(), updated_at=now_iso())
-    else:
-        return emit(failure("session", 2, f"Unknown session action: {action}"), as_json)
-    path = write_session(task, current)
-    current["session_file"] = str(path)
-    current["exit_code"] = 0
-    return emit(current, as_json)
-
-
 def latest_artifact(workspace: Path) -> dict[str, Any] | None:
-    candidates: list[Path] = []
-    for pattern in ("*.pac", "*.zip", "*.bin", "*.hex", "*.elf", "*.axf"):
-        candidates.extend(item for item in workspace.rglob(pattern) if item.is_file())
+    artifact_suffixes = {".pac", ".zip", ".bin", ".hex", ".elf", ".axf"}
+    candidates = [
+        item for item in iter_tool_files(workspace)
+        if item.suffix.lower() in artifact_suffixes
+    ]
     if not candidates:
         return None
     latest = max(candidates, key=lambda item: item.stat().st_mtime)
@@ -171,7 +104,6 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(argv or sys.argv[1:])
     as_json = flag(arguments, "--json")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     if not arguments:
         return emit(failure("agentctl", 2, "Missing subcommand"), as_json)
     command = arguments[0]
@@ -183,20 +115,11 @@ def main(argv: list[str] | None = None) -> int:
                 "status",
                 agent_root=str(AGENT_HOME),
                 logs=str(LOG_DIR),
-                sessions=str(SESSION_DIR),
                 python=sys.version.split()[0],
                 dispatcher="python",
             ),
             as_json,
         )
-    if command == "session":
-        return command_session(arguments, as_json)
-    if command == "claude":
-        parameters = []
-        workspace = option(arguments, "--workspace")
-        if workspace:
-            parameters.extend(["-Workspace", workspace])
-        return run_adapter("claude-start.py", parameters, as_json)
     if command == "build":
         if len(arguments) < 2 or arguments[1] not in {"mcu", "mpu"}:
             return emit(failure("build", 2, "Missing or unknown build target"), as_json)
@@ -235,6 +158,30 @@ def main(argv: list[str] | None = None) -> int:
             return emit(failure("rtt-capture-mcu", 2, "Missing --workspace"), as_json)
         parameters = ["-Workspace", workspace, "-WaitMs", option(arguments, "--wait-ms", "12000") or "12000"]
         if flag(arguments, "--reset"):
+            if not flag(arguments, "--require-confirm"):
+                return emit(
+                    failure(
+                        "rtt-capture-mcu",
+                        2,
+                        "RTT reset capture requires --require-confirm",
+                        blocked=True,
+                        requires_human_confirm=True,
+                        gate={"level": "L3", "mode": "reset", "requires_human_confirm": True, "confirmed": False},
+                    ),
+                    as_json,
+                )
+            if not flag(arguments, "--confirm"):
+                return emit(
+                    failure(
+                        "rtt-capture-mcu",
+                        3,
+                        "RTT reset capture gate is closed until a human passes --confirm",
+                        blocked=True,
+                        requires_human_confirm=True,
+                        gate={"level": "L3", "mode": "reset", "requires_human_confirm": True, "confirmed": False},
+                    ),
+                    as_json,
+                )
             parameters.append("-Reset")
         return run_adapter("rtt-capture-mcu.py", parameters, as_json)
     if command == "artifact":

@@ -20,6 +20,22 @@ def command_build(args: argparse.Namespace) -> int:
         value = result(False, "build", 2, project_id=background["project_id"], target=args.target, first_failure="Target not in background")
         print_result(value, args.json)
         return 2
+    stale = compare_background_fingerprints(background)
+    if stale["stale"]:
+        value = result(
+            False,
+            "build",
+            6,
+            project_id=background["project_id"],
+            background_id=background.get("background_id"),
+            target=args.target,
+            blocked=True,
+            stale=stale,
+            first_failure="Project background is stale",
+        )
+        append_run(paths, background["project_id"], value)
+        print_result(value, args.json)
+        return 6
     target_build = targets.get(background_target, {}).get("build", {})
     if background_target == "mcu" and (target_build.get("method") == "keil" or not args.dry_run):
         selection_status = target_build.get(
@@ -508,6 +524,48 @@ def command_rtt(args: argparse.Namespace) -> int:
         append_run(paths, background["project_id"], value)
         print_result(value, args.json)
         return 5
+    if args.reset and not getattr(args, "require_confirm", False):
+        value = result(
+            False,
+            "rtt-capture",
+            2,
+            project_id=background["project_id"],
+            target=args.target,
+            background_id=background["background_id"],
+            blocked=True,
+            requires_human_confirm=True,
+            gate={
+                "level": "L3",
+                "mode": "reset",
+                "requires_human_confirm": True,
+                "confirmed": False,
+            },
+            first_failure="RTT reset capture requires --require-confirm",
+        )
+        append_run(paths, background["project_id"], value)
+        print_result(value, args.json)
+        return 2
+    if args.reset and not getattr(args, "confirm", False):
+        value = result(
+            False,
+            "rtt-capture",
+            3,
+            project_id=background["project_id"],
+            target=args.target,
+            background_id=background["background_id"],
+            blocked=True,
+            requires_human_confirm=True,
+            gate={
+                "level": "L3",
+                "mode": "reset",
+                "requires_human_confirm": True,
+                "confirmed": False,
+            },
+            first_failure="RTT reset capture gate is closed until --confirm is supplied",
+        )
+        append_run(paths, background["project_id"], value)
+        print_result(value, args.json)
+        return 3
     agentctl_args = [
         "rtt",
         "capture",
@@ -517,7 +575,7 @@ def command_rtt(args: argparse.Namespace) -> int:
         str(args.wait_ms),
     ]
     if args.reset:
-        agentctl_args.append("--reset")
+        agentctl_args.extend(["--reset", "--require-confirm", "--confirm"])
     backend = run_agentctl(args, agentctl_args)
     value = result(
         bool(backend.get("ok")),
@@ -527,8 +585,11 @@ def command_rtt(args: argparse.Namespace) -> int:
         target=args.target,
         background_id=background["background_id"],
         gate={
+            "level": "L3" if args.reset else "L0",
             "background_stale": False,
             "mode": "reset" if args.reset else "attach",
+            "requires_human_confirm": bool(args.reset),
+            "confirmed": bool(args.reset),
         },
         backend=backend,
     )
@@ -655,11 +716,23 @@ def command_flash(args: argparse.Namespace) -> int:
             append_run(paths, background["project_id"], value)
             print_result(value, args.json)
             return 2
+        if not args.connection_id:
+            value = result(
+                False,
+                "flash",
+                2,
+                project_id=background["project_id"],
+                target=args.target,
+                background_id=background["background_id"],
+                first_failure="MPU Aboot flash requires --connection-id",
+            )
+            append_run(paths, background["project_id"], value)
+            print_result(value, args.json)
+            return 2
         backend = run_aboot_flash(
             workspace=Path(background["workspace"]),
             package=args.package,
-            aboot_root=args.aboot_root,
-            firmware_root=args.firmware_root,
+            connection_id=args.connection_id,
             ports=args.port,
             usb_only=args.usb_only,
             auto_enable=args.auto_enable,

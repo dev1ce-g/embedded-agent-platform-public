@@ -4,14 +4,10 @@ set -euo pipefail
 host="${EMBEDDED_AGENT_HOST:-}"
 remote_prefix="${EMBEDDED_AGENT_REMOTE_PREFIX:-}"
 remote_script="${EMBEDDED_AGENT_REMOTE_SCRIPT:-}"
-remote_root="${EMBEDDED_AGENT_REMOTE_ROOT:-}"
-remote_agentctl="${EMBEDDED_AGENT_REMOTE_AGENTCTL:-}"
 connect_timeout="${EMBEDDED_AGENT_CONNECT_TIMEOUT:-8}"
 
 if [[ -n "$remote_prefix" ]]; then
   remote_script="${remote_script:-${remote_prefix}\\bin\\embedded-agent.py}"
-  remote_root="${remote_root:-${remote_prefix}\\state}"
-  remote_agentctl="${remote_agentctl:-${remote_prefix}\\bin\\agentctl.py}"
 fi
 
 usage() {
@@ -26,7 +22,6 @@ Usage:
   embedded-agent device serial-inspect --project <id> --tty <tty> [--serial <adb-serial>] --json
   embedded-agent knowledge build --project <id> --write --json
   embedded-agent knowledge show --project <id> --json
-  embedded-agent knowledge export --project <id> --to <path> --json
   embedded-agent tool resolve-path --project <id> --path <path> --json
   embedded-agent tool stat --project <id> --path <path> [--sha256] --json
   embedded-agent tool list --project <id> --path <path> [--max-entries 200] --json
@@ -51,25 +46,24 @@ Usage:
   embedded-agent sdk list --json
   embedded-agent sdk search --query <project-or-sdk> [--limit 10] --json
   embedded-agent sdk components --sdk <name> [--component <path>] [--max-entries 200] --json
-  embedded-agent sdk project-resolve --project <id> [--workspace <win-path>] [--ci-dir <path>] --json
-  embedded-agent sdk project-pull --project <id> [--workspace <win-path>] [--ci-dir <path>] [--sdk-name <sdk>] [--sdk-version <version>] --confirm --json
-  embedded-agent sdk materialize --project <id> [--workspace <win-path>] --sdk <name> --component <path> --to <project-path> [--mode junction|copy] [--replace-managed] --confirm --json
-  embedded-agent sdk check-mapping --project <id> [--workspace <win-path>] --sdk <name> --component <path> --to <project-path> [--mode junction|copy] --json
-  embedded-agent workspace remove --project <id> [--allow-dirty] --confirm --json
+  embedded-agent sdk project-resolve --project <id> [--ci-dir <path>] --json
+  embedded-agent sdk project-pull --project <id> [--ci-dir <path>] [--sdk-name <sdk>] [--sdk-version <version>] --confirm --json
+  embedded-agent sdk materialize --project <id> --sdk <name> --component <path> --to <project-path> [--mode junction|copy] [--replace-managed] --confirm --json
+  embedded-agent sdk check-mapping --project <id> --sdk <name> --component <path> --to <project-path> [--mode junction|copy] --json
   embedded-agent job start --project <id> --kind build --target keil|mpu [--sdk-path <project-path>] --json
-  embedded-agent job start --project <id> --kind jenkins-wait --job <name> --build <number> [--wait-timeout 2700] --json
+  embedded-agent job start --project <id> --kind jenkins-wait --connection-id <connection-id> --job <name> --build <number> [--wait-timeout 2700] --json
   embedded-agent job status --job-id <job-id> --json
   embedded-agent job output --job-id <job-id> [--stream stdout|stderr|runner] [--offset 0] [--max-bytes 65536] --json
   embedded-agent job cancel --job-id <job-id> --confirm --json
   embedded-agent job list [--project <id>] [--limit 20] --json
-  embedded-agent jenkins auth-check --json
-  embedded-agent jenkins job-inspect --job <name> --json
-  embedded-agent jenkins parameters --job <name> --build <number> --json
-  embedded-agent jenkins build-start --job <name> --from-build <number> [--set NAME=VALUE] --confirm --json
-  embedded-agent jenkins build-status --job <name> --build <number> --json
-  embedded-agent jenkins build-wait --job <name> --build <number> [--wait-timeout 2700] --json
-  embedded-agent jenkins console-tail --job <name> --build <number> [--max-chars 12000] --json
-  embedded-agent artifact download --project <id> --url <artifact-url> --to <project-path> --sha256 <digest> --confirm --json
+  embedded-agent jenkins --connection-id <connection-id> auth-check --json
+  embedded-agent jenkins --connection-id <connection-id> job-inspect --job <name> --json
+  embedded-agent jenkins --connection-id <connection-id> parameters --job <name> --build <number> --json
+  embedded-agent jenkins --connection-id <connection-id> build-start --job <name> --from-build <number> [--set NAME=VALUE] --confirm --json
+  embedded-agent jenkins --connection-id <connection-id> build-status --job <name> --build <number> --json
+  embedded-agent jenkins --connection-id <connection-id> build-wait --job <name> --build <number> [--wait-timeout 2700] --json
+  embedded-agent jenkins --connection-id <connection-id> console-tail --job <name> --build <number> [--max-chars 12000] --json
+  embedded-agent artifact download --connection-id <connection-id> --project <id> --url <artifact-url> --to <project-path> --sha256 <digest> --confirm --json
   embedded-agent build --project <id> --target keil|mpu [--sdk-path <project-path>] --json
   embedded-agent log tail --project <id> --kind build|serial|flash --since 10m --json
   embedded-agent log import --project <id> --task <task-id> --label <label> --source <desktop-log-path> --confirm --json
@@ -86,15 +80,14 @@ Usage:
   embedded-agent can send --driver <name> --frame <ID#DATA> --require-confirm [--confirm] --json
   embedded-agent can uds-ecu --driver <name> --rxid <id> --txid <id> --profile <name> --idle-timeout <seconds> --require-confirm [--confirm] --json
   embedded-agent can uds-tester --driver <name> --txid <id> --rxid <id> --request <hex> --require-confirm [--confirm] --json
-  embedded-agent rtt capture --project <id> --target mcu [--wait-ms 12000] [--reset] --json
+  embedded-agent rtt capture --project <id> --target mcu [--wait-ms 12000] [--reset --require-confirm --confirm] --json
   embedded-agent flash --project <id> --target mcu|mpu --require-confirm [--confirm] --json
 
 Environment:
   EMBEDDED_AGENT_HOST          Required SSH host alias
-  EMBEDDED_AGENT_REMOTE_PREFIX Windows install root; derives script, state and backend paths
+  EMBEDDED_AGENT_REMOTE_PREFIX Windows install root; derives the stable entry path
   EMBEDDED_AGENT_REMOTE_SCRIPT Optional explicit Windows entry path
-  EMBEDDED_AGENT_REMOTE_ROOT   Optional explicit Windows state root
-  EMBEDDED_AGENT_REMOTE_AGENTCTL Optional explicit Windows backend path
+  Windows state and backend paths are owned by the installed stable launcher.
   EMBEDDED_AGENT_CONNECT_TIMEOUT SSH connect timeout in seconds, default: 8
 
 USAGE
@@ -110,11 +103,26 @@ emit_transport_failure() {
     python3 - "$transport_exit" "$host" "$connect_timeout" <<'PY'
 import json
 import sys
+from datetime import datetime, timezone
 
 print(json.dumps({
+    "schema_version": "embedded-capability-result/v1",
+    "contract_version": "1.0.0",
+    "capability_id": "agent.transport",
+    "phase": "execute",
+    "state": "failed",
     "ok": False,
     "operation": "agent-transport",
     "exit_code": int(sys.argv[1]),
+    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "evidence": [],
+    "error": {
+        "code": "SSH_TRANSPORT_UNAVAILABLE",
+        "category": "transport",
+        "message": "SSH transport failed before the Windows embedded-agent started",
+        "retryable": True,
+        "next_hint": "Check the network or VPN, Windows host power, and the SSH host mapping before retrying",
+    },
     "host": sys.argv[2],
     "connect_timeout_seconds": int(sys.argv[3]),
     "retryable": True,
@@ -139,18 +147,13 @@ ssh_options=(
 
 run_remote() {
   local encoded
-  encoded="$(python3 - "$remote_script" "$remote_root" "$remote_agentctl" "$@" <<'PY'
+  encoded="$(python3 - "$@" <<'PY'
 import base64
 import json
 import sys
 
 payload = json.dumps(
-    {
-        "script": sys.argv[1],
-        "root": sys.argv[2],
-        "agentctl": sys.argv[3],
-        "args": sys.argv[4:],
-    },
+    {"args": sys.argv[1:]},
     ensure_ascii=True,
     separators=(",", ":"),
 )
@@ -158,10 +161,6 @@ print(base64.b64encode(payload.encode("utf-8")).decode("ascii"))
 PY
 )"
   ssh "${ssh_options[@]}" "$host" py -3 "$remote_script" --payload-b64 "$encoded"
-}
-
-run_scp() {
-  scp -q "${ssh_options[@]}" "$@"
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || $# -lt 1 ]]; then
@@ -181,21 +180,35 @@ for arg in "${args[@]}"; do
   fi
 done
 
-if [[ -z "$host" || -z "$remote_script" || -z "$remote_root" || -z "$remote_agentctl" ]]; then
+if [[ -z "$host" || -z "$remote_script" ]]; then
   if [[ "$json_requested" -eq 1 ]]; then
     python3 - <<'PY'
 import json
+from datetime import datetime, timezone
 
 print(json.dumps({
+    "schema_version": "embedded-capability-result/v1",
+    "contract_version": "1.0.0",
+    "capability_id": "agent.transport",
+    "phase": "execute",
+    "state": "failed",
     "ok": False,
     "operation": "agent-transport",
     "exit_code": 2,
+    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "evidence": [],
+    "error": {
+        "code": "SSH_TRANSPORT_CONFIGURATION_MISSING",
+        "category": "invalid_request",
+        "message": "Configure EMBEDDED_AGENT_HOST and EMBEDDED_AGENT_REMOTE_PREFIX or EMBEDDED_AGENT_REMOTE_SCRIPT",
+        "retryable": False,
+    },
     "error_code": "SSH_TRANSPORT_CONFIGURATION_MISSING",
-    "first_failure": "Configure EMBEDDED_AGENT_HOST and EMBEDDED_AGENT_REMOTE_PREFIX",
+    "first_failure": "Configure EMBEDDED_AGENT_HOST and EMBEDDED_AGENT_REMOTE_PREFIX or EMBEDDED_AGENT_REMOTE_SCRIPT",
 }, ensure_ascii=False, separators=(",", ":")))
 PY
   else
-    echo "embedded-agent: configure EMBEDDED_AGENT_HOST and EMBEDDED_AGENT_REMOTE_PREFIX" >&2
+    echo "embedded-agent: configure EMBEDDED_AGENT_HOST and EMBEDDED_AGENT_REMOTE_PREFIX or EMBEDDED_AGENT_REMOTE_SCRIPT" >&2
   fi
   exit 2
 fi
@@ -205,11 +218,25 @@ if [[ ! "$connect_timeout" =~ ^[1-9][0-9]*$ ]]; then
     python3 - "$connect_timeout" <<'PY'
 import json
 import sys
+from datetime import datetime, timezone
 
 print(json.dumps({
+    "schema_version": "embedded-capability-result/v1",
+    "contract_version": "1.0.0",
+    "capability_id": "agent.transport",
+    "phase": "execute",
+    "state": "failed",
     "ok": False,
     "operation": "agent-transport",
     "exit_code": 2,
+    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "evidence": [],
+    "error": {
+        "code": "SSH_TRANSPORT_CONFIGURATION_INVALID",
+        "category": "invalid_request",
+        "message": "EMBEDDED_AGENT_CONNECT_TIMEOUT must be a positive integer",
+        "retryable": False,
+    },
     "error_code": "SSH_TRANSPORT_CONFIGURATION_INVALID",
     "first_failure": "EMBEDDED_AGENT_CONNECT_TIMEOUT must be a positive integer",
     "configured_value": sys.argv[1],
@@ -219,68 +246,6 @@ PY
     echo "embedded-agent: EMBEDDED_AGENT_CONNECT_TIMEOUT must be a positive integer" >&2
   fi
   exit 2
-fi
-
-if [[ "${args[0]}" == "knowledge" && "${args[1]:-}" == "export" ]]; then
-  project=""
-  target=""
-  json=0
-  for ((i = 0; i < ${#args[@]}; i++)); do
-    case "${args[$i]}" in
-      --project)
-        project="${args[$((i + 1))]:-}"
-        ;;
-      --to)
-        target="${args[$((i + 1))]:-}"
-        ;;
-      --json)
-        json=1
-        ;;
-    esac
-  done
-  if [[ -z "$project" || -z "$target" ]]; then
-    echo "embedded-agent: knowledge export requires --project and --to" >&2
-    exit 2
-  fi
-
-  if run_remote knowledge build --project "$project" --write --json >/dev/null; then
-    :
-  else
-    transport_exit=$?
-    emit_transport_failure "$transport_exit"
-    exit "$transport_exit"
-  fi
-  mkdir -p "$target"
-  remote_dir="${remote_root//\\//}/projects/${project}/knowledge/*"
-  if run_scp "$host:$remote_dir" "$target/"; then
-    :
-  else
-    transport_exit=$?
-    emit_transport_failure "$transport_exit"
-    exit "$transport_exit"
-  fi
-  if [[ "$json" -eq 1 ]]; then
-    python3 - "$project" "$target" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-project = sys.argv[1]
-target = Path(sys.argv[2])
-written = sorted(str(path) for path in target.iterdir() if path.is_file())
-print(json.dumps({
-    "ok": True,
-    "operation": "knowledge-export",
-    "exit_code": 0,
-    "project_id": project,
-    "target": str(target),
-    "written": written,
-}, ensure_ascii=False, separators=(",", ":")))
-PY
-  else
-    echo "Knowledge exported to $target"
-  fi
-  exit 0
 fi
 
 if [[ "${args[0]}" == "flash" ]]; then

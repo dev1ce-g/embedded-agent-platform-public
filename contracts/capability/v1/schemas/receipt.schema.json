@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receipt.schema.json",
+  "title": "Embedded Capability Evidence Receipt v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract_version",
+    "receipt_id",
+    "execution_id",
+    "capability_id",
+    "capability_revision",
+    "created_at",
+    "context",
+    "input",
+    "gate",
+    "outcome",
+    "evidence",
+    "producer",
+    "integrity"
+  ],
+  "properties": {
+    "schema_version": {"const": "embedded-capability-receipt/v1"},
+    "contract_version": {"type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$"},
+    "receipt_id": {"type": "string", "minLength": 1},
+    "execution_id": {"type": "string", "minLength": 1},
+    "capability_id": {"$ref": "common.schema.json#/$defs/capability_id"},
+    "capability_revision": {"type": "string", "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "context": {"$ref": "common.schema.json#/$defs/context"},
+    "input": {
+      "type": "object",
+      "required": ["digest", "redacted"],
+      "properties": {
+        "digest": {"$ref": "common.schema.json#/$defs/sha256"},
+        "redacted": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "preflight": {
+      "type": "object",
+      "required": ["id", "input_digest"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "input_digest": {"$ref": "common.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "gate": {"$ref": "common.schema.json#/$defs/gate"},
+    "outcome": {
+      "type": "object",
+      "required": ["state", "ok", "exit_code", "started_at", "finished_at", "error"],
+      "properties": {
+        "state": {"type": "string", "enum": ["succeeded", "failed", "blocked", "canceled"]},
+        "ok": {"type": "boolean"},
+        "exit_code": {"type": "integer"},
+        "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "finished_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "first_failure": {"type": ["string", "null"]},
+        "error": {
+          "anyOf": [
+            {"$ref": "common.schema.json#/$defs/error"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/evidence_ref"}
+    },
+    "producer": {
+      "type": "object",
+      "required": ["runtime_id", "runtime_version", "adapter_id"],
+      "properties": {
+        "runtime_id": {"type": "string", "minLength": 1},
+        "runtime_version": {"type": "string", "minLength": 1},
+        "adapter_id": {"type": "string", "minLength": 1},
+        "adapter_version": {"type": "string", "minLength": 1},
+        "module_manifest_sha256": {"$ref": "common.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["algorithm", "canonicalization", "payload_sha256"],
+      "properties": {
+        "algorithm": {"const": "sha256"},
+        "canonicalization": {"const": "json-sort-keys-v1"},
+        "payload_sha256": {"$ref": "common.schema.json#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

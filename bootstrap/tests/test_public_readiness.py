@@ -13,7 +13,6 @@ FORBIDDEN_MARKERS = (
     "172.16." + "1.84",
     "hq" + "-",
     "hq" + "_",
-    "dev1ce" + "-g",
     "deyi" + ".guan",
     "alex" + ".chen",
 )

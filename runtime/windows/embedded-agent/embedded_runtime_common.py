@@ -27,7 +27,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from jenkins_client import JenkinsClient, JenkinsError, load_sdk_credentials
+from embedded_runtime_contract import (
+    CAPABILITY_CONTRACT_VERSION,
+    CAPABILITY_RESULT_SCHEMA_VERSION,
+    capability_result,
+    contract_now_iso,
+)
 
 
 SCHEMA_VERSION = "embedded-project-background/v1"
@@ -36,21 +41,18 @@ DEFAULT_INSTALL_ROOT = Path(
     or Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "EmbeddedAgentPlatform"
 )
 DEFAULT_ROOT = Path(os.environ.get("EMBEDDED_AGENT_ROOT", str(DEFAULT_INSTALL_ROOT / "state")))
-DEFAULT_AGENTCTL = Path(
-    os.environ.get(
-        "EMBEDDED_AGENTCTL",
-        str(Path(__file__).resolve().parents[1] / "bin" / "agentctl.py"),
-    )
-)
-DEFAULT_SDK_MANAGER = Path(os.environ.get("EMBEDDED_SDK_MANAGER", str(DEFAULT_INSTALL_ROOT / "tools" / "sdk_manager.py")))
+RUNTIME_SOURCE_HOME = Path(__file__).resolve().parents[1]
+# Executable Python backends are code, not configuration. Keep their locations
+# anchored to the installed Runtime tree so environment variables and public CLI
+# arguments cannot select another script.
+DEFAULT_AGENTCTL = RUNTIME_SOURCE_HOME / "bin" / "agentctl.py"
+DEFAULT_SDK_MANAGER = RUNTIME_SOURCE_HOME / "bin" / "sdk-manager.py"
 DEFAULT_SDK_STORE = Path(os.environ.get("EMBEDDED_SDK_STORE", str(DEFAULT_INSTALL_ROOT / "sdk")))
 DEFAULT_SDK_LOCK = Path(os.environ.get("EMBEDDED_SDK_LOCK", str(DEFAULT_INSTALL_ROOT / "sdk.lock")))
 DEFAULT_WORKSPACE_ROOT = Path(os.environ.get("EMBEDDED_AGENT_WORKSPACE_ROOT", str(DEFAULT_INSTALL_ROOT / "workspaces")))
-DEFAULT_JENKINS_SERVER = os.environ.get("EMBEDDED_JENKINS_SERVER", "")
-DEFAULT_JENKINS_CONFIG = Path(os.environ.get("EMBEDDED_JENKINS_CONFIG", str(DEFAULT_INSTALL_ROOT / "jenkins.json")))
 FINGERPRINT_SUFFIXES = {".uvprojx", ".uvproj", ".uvoptx", ".ps1", ".sh", ".cmake"}
 FINGERPRINT_NAMES = {"CMakeLists.txt", "Makefile", "makefile", "build.sh", "build.ps1"}
-IGNORE_DIRS = {".git", ".trellis", "build", "out", "dist", "__pycache__", "node_modules"}
+IGNORE_DIRS = {".git", ".trellis", ".embedded-agent", "build", "out", "dist", "__pycache__", "node_modules"}
 TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "cp936")
 SMALL_HASH_LIMIT = 16 * 1024 * 1024
 DEFAULT_READ_BYTES = 64 * 1024
@@ -67,8 +69,10 @@ MAX_GIT_LIMIT = 200
 MAX_SNIPPET_CHARS = 300
 MAX_LOG_CONTEXT_LINES = 200
 LOG_ARTIFACT_SCHEMA_VERSION = "embedded-log-artifact/v1"
-RUNTIME_CONTRACT_VERSION = "0.8.0"
+RUNTIME_CONTRACT_VERSION = CAPABILITY_CONTRACT_VERSION
+UNKNOWN_PLATFORM_VERSION = "unknown"
 RUNTIME_MODULE_FILES = (
+    "embedded_runtime_contract.py",
     "embedded_runtime_aboot.py",
     "embedded_runtime_cli.py",
     "embedded_runtime_can.py",
@@ -82,6 +86,38 @@ RUNTIME_MODULE_FILES = (
     "embedded_runtime_sdk.py",
     "embedded_runtime_tools.py",
 )
+
+
+def _version_from_file(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?",
+        value,
+    ):
+        return None
+    return value
+
+
+def platform_version() -> str:
+    """Read the installed release version, with a source-checkout fallback."""
+    installed = _version_from_file(RUNTIME_SOURCE_HOME / "VERSION")
+    if installed is not None:
+        return installed
+
+    # When run directly from this repository RUNTIME_SOURCE_HOME is
+    # <repo>/runtime/windows. Only use the ancestor fallback when the expected
+    # source-tree marker exists, so an incomplete installation cannot pick up
+    # an unrelated ancestor VERSION file.
+    if len(RUNTIME_SOURCE_HOME.parents) > 1:
+        repository_root = RUNTIME_SOURCE_HOME.parents[1]
+        if (repository_root / "bootstrap" / "embedded_project.py").is_file():
+            source = _version_from_file(repository_root / "VERSION")
+            if source is not None:
+                return source
+    return UNKNOWN_PLATFORM_VERSION
 ADB_TTY_NAME_PATTERN = re.compile(r"tty[A-Za-z0-9_.-]{1,63}\Z")
 ADB_DEVICE_SERIAL_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -101,6 +137,7 @@ class AgentPaths:
     root: Path
     projects: Path
     jobs: Path
+    workspace_root: Path
 
 
 def background_target_name(target: str) -> str:
@@ -108,7 +145,7 @@ def background_target_name(target: str) -> str:
     return "mcu" if target == "keil" else target
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return contract_now_iso()
 
 def json_dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -125,14 +162,7 @@ def result(
     exit_code: int = 0,
     **fields: Any,
 ) -> dict[str, Any]:
-    value: dict[str, Any] = {
-        "ok": ok,
-        "operation": operation,
-        "exit_code": exit_code,
-        "timestamp": now_iso(),
-    }
-    value.update(fields)
-    return value
+    return capability_result(ok, operation, exit_code, timestamp=now_iso(), **fields)
 
 def sha256_file(path: Path) -> str | None:
     try:
@@ -144,13 +174,46 @@ def sha256_file(path: Path) -> str | None:
     except OSError:
         return None
 
+PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
 def safe_project_id(project: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in project.strip())
-    return safe or "unknown-project"
+    candidate = project.strip()
+    stem = candidate.split(".", 1)[0].upper()
+    if (
+        not PROJECT_ID_PATTERN.fullmatch(candidate)
+        or candidate in {".", ".."}
+        or candidate.endswith(".")
+        or stem in WINDOWS_RESERVED_NAMES
+    ):
+        raise ValueError(
+            "project id must be 1-128 ASCII letters, digits, dots, underscores, or "
+            "hyphens; it must start with a letter or digit and not be a reserved name"
+        )
+    return candidate
 
 def agent_paths(root: Path | None) -> AgentPaths:
     base = (root or DEFAULT_ROOT).resolve()
-    return AgentPaths(root=base, projects=base / "projects", jobs=base / "jobs")
+    default_root = DEFAULT_ROOT.expanduser().resolve()
+    # The stable public launcher pins DEFAULT_ROOT, whose workspace boundary is
+    # machine configuration.  Isolated test harnesses use a non-default state
+    # root and deliberately keep their workspace beside it under root.parent.
+    workspace_root = (
+        DEFAULT_WORKSPACE_ROOT.expanduser()
+        if _same_local_path(base, default_root)
+        else base.parent
+    )
+    return AgentPaths(
+        root=base,
+        projects=base / "projects",
+        jobs=base / "jobs",
+        workspace_root=workspace_root,
+    )
 
 def project_dir(paths: AgentPaths, project: str) -> Path:
     return paths.projects / safe_project_id(project)
@@ -232,6 +295,213 @@ def is_reparse_point(path: Path) -> bool:
         return False
     reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return path.is_symlink() or bool(attributes & reparse_flag)
+
+
+def validated_workspace_output_path(
+    workspace: Path,
+    relative_path: Path,
+    *,
+    label: str = "Workspace output",
+) -> Path:
+    """Return a fixed workspace output path without following reparse points.
+
+    The returned path may not exist yet. Every existing component from the
+    workspace through the requested leaf is checked with ``lstat`` so a project
+    cannot redirect Runtime writes through a symlink or Windows junction.
+    """
+    relative = Path(relative_path)
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise ValueError(f"{label} must be a normalized workspace-relative path")
+
+    try:
+        lexical_workspace = Path(os.path.abspath(os.fspath(Path(workspace).expanduser())))
+        workspace_stat = lexical_workspace.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} workspace is unavailable: {exc}") from exc
+    if is_reparse_point(lexical_workspace) or not stat_module.S_ISDIR(workspace_stat.st_mode):
+        raise ValueError(f"{label} workspace must be a real directory, not a symlink or reparse point")
+    for component in lexical_workspace.parents:
+        if is_reparse_point(component):
+            raise ValueError(f"{label} must not traverse a symlink or reparse point: {component}")
+    try:
+        canonical_workspace = lexical_workspace.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} workspace cannot be resolved: {exc}") from exc
+    if not _same_local_path(lexical_workspace, canonical_workspace):
+        raise ValueError(f"{label} workspace must already be canonical: {lexical_workspace}")
+
+    candidate = canonical_workspace.joinpath(relative)
+    current = canonical_workspace
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        try:
+            item_stat = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"{label} cannot inspect path component {current}: {exc}") from exc
+        if is_reparse_point(current):
+            raise ValueError(f"{label} must not traverse a symlink or reparse point: {current}")
+        if index < len(relative.parts) - 1 and not stat_module.S_ISDIR(item_stat.st_mode):
+            raise ValueError(f"{label} parent is not a directory: {current}")
+
+    try:
+        canonical_candidate = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} cannot be resolved: {exc}") from exc
+    if (
+        not is_lexically_relative_to(canonical_candidate, canonical_workspace)
+        or not _same_local_path(candidate, canonical_candidate)
+    ):
+        raise ValueError(f"{label} escapes the registered workspace: {candidate}")
+    return candidate
+
+
+def ensure_workspace_output_directory(
+    workspace: Path,
+    relative_path: Path,
+    *,
+    label: str = "Workspace output directory",
+) -> Path:
+    """Create a workspace output directory one checked component at a time."""
+    destination = validated_workspace_output_path(
+        workspace,
+        relative_path,
+        label=label,
+    )
+    canonical_workspace = Path(os.path.abspath(os.fspath(Path(workspace).expanduser()))).resolve(
+        strict=True
+    )
+    relative = destination.relative_to(canonical_workspace)
+    current = canonical_workspace
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        try:
+            item_stat = current.lstat()
+        except FileNotFoundError:
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise ValueError(f"{label} cannot create directory {current}: {exc}") from exc
+            try:
+                item_stat = current.lstat()
+            except OSError as exc:
+                raise ValueError(f"{label} cannot inspect created directory {current}: {exc}") from exc
+        except OSError as exc:
+            raise ValueError(f"{label} cannot inspect directory {current}: {exc}") from exc
+        if is_reparse_point(current):
+            raise ValueError(f"{label} must not traverse a symlink or reparse point: {current}")
+        if not stat_module.S_ISDIR(item_stat.st_mode):
+            raise ValueError(f"{label} path component is not a directory: {current}")
+        validated_workspace_output_path(
+            canonical_workspace,
+            Path(*relative.parts[: index + 1]),
+            label=label,
+        )
+    return validated_workspace_output_path(
+        canonical_workspace,
+        relative,
+        label=label,
+    )
+
+
+def is_safe_tree_directory(path: Path, root: Path) -> bool:
+    """Return true only for a real directory contained by the scanned tree."""
+    try:
+        item_stat = path.lstat()
+        canonical = path.resolve(strict=True)
+        canonical_root = root.resolve(strict=True)
+    except OSError:
+        return False
+    return (
+        not is_reparse_point(path)
+        and stat_module.S_ISDIR(item_stat.st_mode)
+        and is_lexically_relative_to(canonical, canonical_root)
+    )
+
+def resolve_managed_workspace(
+    value: str | Path,
+    *,
+    must_exist: bool,
+    workspace_root: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Resolve a project workspace below its configured workspace root."""
+    requested = Path(value).expanduser()
+    if not requested.is_absolute():
+        return None, "Workspace must be an absolute path"
+    configured = (workspace_root or DEFAULT_WORKSPACE_ROOT).expanduser()
+    configured_lexical = Path(os.path.abspath(configured))
+    requested_lexical = Path(os.path.abspath(requested))
+    try:
+        configured_root = configured_lexical.resolve(strict=False)
+        workspace = requested_lexical.resolve(strict=must_exist)
+    except (OSError, RuntimeError) as exc:
+        return None, f"Workspace cannot be resolved: {exc}"
+    if not is_lexically_relative_to(workspace, configured_root):
+        return None, f"Workspace is outside the configured workspace root: {configured_root}"
+    if configured_lexical.exists() and (
+        is_reparse_point(configured_lexical) or not configured_lexical.is_dir()
+    ):
+        return None, "Configured workspace root must be a real directory, not a reparse point"
+    try:
+        relative = requested_lexical.relative_to(configured_lexical)
+    except ValueError:
+        return None, f"Workspace is outside the configured workspace root: {configured_root}"
+    current = configured_lexical
+    for part in relative.parts:
+        current = current / part
+        if current.exists() and is_reparse_point(current):
+            return None, f"Workspace must not traverse a symlink or reparse point: {current}"
+    if must_exist and not workspace.is_dir():
+        return None, "Workspace does not exist or is not a directory"
+    return workspace, None
+
+def _same_local_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(os.fspath(left))) == os.path.normcase(
+        os.path.abspath(os.fspath(right))
+    )
+
+def _validate_runtime_owned_python(
+    candidate: Path,
+    relative_path: str,
+    label: str,
+) -> tuple[Path | None, str | None]:
+    """Resolve an exact, non-reparse Python resource in the Runtime tree."""
+    expected = RUNTIME_SOURCE_HOME / Path(relative_path)
+    if not _same_local_path(candidate, expected):
+        return None, f"{label} is not the Runtime-owned resource: {expected}"
+    try:
+        parent_stat = expected.parent.lstat()
+        resource_stat = expected.lstat()
+        resolved = expected.resolve(strict=True)
+    except FileNotFoundError:
+        return None, f"{label} capability unavailable: Runtime-owned resource is not installed"
+    except OSError as exc:
+        return None, f"{label} capability unavailable: cannot inspect Runtime-owned resource: {exc}"
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    parent_reparse = expected.parent.is_symlink() or bool(
+        getattr(parent_stat, "st_file_attributes", 0) & reparse_flag
+    )
+    resource_reparse = expected.is_symlink() or bool(
+        getattr(resource_stat, "st_file_attributes", 0) & reparse_flag
+    )
+    if parent_reparse or not stat_module.S_ISDIR(parent_stat.st_mode):
+        return None, f"{label} capability unavailable: Runtime resource directory is not trusted"
+    if resource_reparse or not stat_module.S_ISREG(resource_stat.st_mode):
+        return None, f"{label} capability unavailable: Runtime-owned resource must be a regular non-symlink file"
+    if not _same_local_path(resolved, expected) or not _same_local_path(resolved.parent, expected.parent):
+        return None, f"{label} capability unavailable: Runtime-owned resource escapes its trusted directory"
+    return resolved, None
+
+def trusted_agentctl() -> tuple[Path | None, str | None]:
+    return _validate_runtime_owned_python(DEFAULT_AGENTCTL, "bin/agentctl.py", "Agent control backend")
+
+def trusted_sdk_manager() -> tuple[Path | None, str | None]:
+    return _validate_runtime_owned_python(DEFAULT_SDK_MANAGER, "bin/sdk-manager.py", "SDK Manager")
 
 def valid_log_identifier(value: str, maximum: int) -> bool:
     return bool(re.fullmatch(rf"[A-Za-z0-9][A-Za-z0-9_.-]{{0,{maximum - 1}}}", value))
@@ -335,6 +605,44 @@ def resolve_sdk_target(workspace: Path, value: str) -> dict[str, Any]:
         "kind": path_kind(target),
         "inside_workspace": inside_workspace,
     }
+
+def validate_non_reparse_ancestors(root: Path, target: Path) -> tuple[Path | None, str | None]:
+    """Reject existing reparse ancestors while intentionally excluding the leaf.
+
+    SDK mappings may themselves be managed Junctions, so resolving the complete
+    destination would incorrectly classify a valid mapping as a workspace escape.
+    Walking the lexical parent chain catches an attacker-controlled ancestor
+    without changing the check/replace semantics of the destination itself.
+    """
+    root = Path(os.path.abspath(os.fspath(root)))
+    target = Path(os.path.abspath(os.fspath(target)))
+    if not is_lexically_relative_to(target, root):
+        return root, "Path is outside the trusted root"
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return root, "Path is outside the trusted root"
+
+    ancestors = [root]
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        ancestors.append(current)
+
+    for index, ancestor in enumerate(ancestors):
+        try:
+            ancestor_stat = ancestor.lstat()
+        except FileNotFoundError:
+            if index == 0:
+                return ancestor, "Trusted root does not exist"
+            break
+        except OSError as exc:
+            return ancestor, f"Cannot inspect path ancestor: {exc}"
+        if is_reparse_point(ancestor):
+            return ancestor, "Path must not traverse a symlink or reparse point"
+        if not stat_module.S_ISDIR(ancestor_stat.st_mode):
+            return ancestor, "Path ancestor is not a directory"
+    return None, None
 
 def fail_outside_workspace(operation: str, background: dict[str, Any], info: dict[str, Any], as_json: bool) -> int:
     value = result(
@@ -488,16 +796,72 @@ def bounded_entries(path: Path, max_entries: int) -> tuple[list[dict[str, Any]],
     return entries, len(children), len(children) > max_entries
 
 def iter_tool_files(root: Path) -> list[Path]:
-    if root.is_file():
-        return [root]
+    """Return regular files without crossing a symlink or reparse boundary."""
+    try:
+        root_stat = root.lstat()
+    except OSError:
+        return []
+    if is_reparse_point(root):
+        return []
+    try:
+        canonical_root = root.resolve(strict=True)
+    except OSError:
+        return []
+    if stat_module.S_ISREG(root_stat.st_mode):
+        return [canonical_root]
+    if not stat_module.S_ISDIR(root_stat.st_mode):
+        return []
+
     files: list[Path] = []
-    if not root.exists():
-        return files
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
+    for dirpath, dirnames, filenames in os.walk(canonical_root, followlinks=False):
         base = Path(dirpath)
+        try:
+            base_stat = base.lstat()
+            resolved_base = base.resolve(strict=True)
+        except OSError:
+            dirnames[:] = []
+            continue
+        if (
+            is_reparse_point(base)
+            or not stat_module.S_ISDIR(base_stat.st_mode)
+            or not is_lexically_relative_to(resolved_base, canonical_root)
+        ):
+            dirnames[:] = []
+            continue
+
+        safe_directories: list[str] = []
+        for dirname in dirnames:
+            if dirname in IGNORE_DIRS or dirname.startswith("."):
+                continue
+            candidate = base / dirname
+            try:
+                candidate_stat = candidate.lstat()
+                resolved_candidate = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if (
+                is_reparse_point(candidate)
+                or not stat_module.S_ISDIR(candidate_stat.st_mode)
+                or not is_lexically_relative_to(resolved_candidate, canonical_root)
+            ):
+                continue
+            safe_directories.append(dirname)
+        dirnames[:] = safe_directories
+
         for filename in filenames:
-            files.append(base / filename)
+            candidate = base / filename
+            try:
+                candidate_stat = candidate.lstat()
+                resolved_candidate = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if (
+                is_reparse_point(candidate)
+                or not stat_module.S_ISREG(candidate_stat.st_mode)
+                or not is_lexically_relative_to(resolved_candidate, canonical_root)
+            ):
+                continue
+            files.append(resolved_candidate)
     return sorted(files, key=lambda item: str(item).lower())
 
 def detect_first_failure(lines: list[str]) -> dict[str, Any]:
@@ -518,15 +882,7 @@ def detect_first_failure(lines: list[str]) -> dict[str, Any]:
     }
 
 def iter_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    if not root.exists():
-        return files
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
-        base = Path(dirpath)
-        for filename in filenames:
-            files.append(base / filename)
-    return sorted(files, key=lambda path: str(path).lower())
+    return iter_tool_files(root)
 
 def parse_manifest(path: Path) -> list[dict[str, str]]:
     try:
@@ -935,7 +1291,9 @@ def git_short_value(repo: Path, git_args: list[str]) -> str | None:
 def classify_architecture(workspace: Path, manifests: list[dict[str, Any]]) -> str:
     joined = json.dumps(manifests, ensure_ascii=False).lower()
     workspace_text = str(workspace).replace("\\", "/").lower()
-    if (workspace / "mcu").is_dir() and (workspace / "mpu").is_dir():
+    has_mcu = is_safe_tree_directory(workspace / "mcu", workspace)
+    has_mpu = is_safe_tree_directory(workspace / "mpu", workspace)
+    if has_mcu and has_mpu:
         return "mcu-mpu"
     soc_markers = (
         "new_energy/top",
@@ -951,13 +1309,29 @@ def classify_architecture(workspace: Path, manifests: list[dict[str, Any]]) -> s
         return "mcu-soc"
     if "/mpu" in joined or "_mpu" in joined:
         return "mcu-mpu"
-    if (workspace / "mcu").is_dir():
+    if has_mcu:
         return "mcu-only"
     return "unknown"
 
 def build_fingerprints(workspace: Path, files: list[Path]) -> list[dict[str, str]]:
+    try:
+        canonical_workspace = workspace.resolve(strict=True)
+    except OSError:
+        return []
     fingerprints: list[dict[str, str]] = []
     for path in files:
+        try:
+            path_stat = path.lstat()
+            resolved_path = path.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            is_reparse_point(path)
+            or not stat_module.S_ISREG(path_stat.st_mode)
+            or not is_lexically_relative_to(resolved_path, canonical_workspace)
+        ):
+            continue
+        path = resolved_path
         is_manifest = path.parent.name == "manifests" and path.suffix.lower() == ".xml"
         is_sdk_manifest = path.parent.name == "sdk_ver" and path.name.endswith("_manifest.xml")
         is_key_file = (
@@ -1009,11 +1383,20 @@ def discover_background(
                 build_files.append({"kind": "build_file", "path": rel(file, workspace)})
 
     for child in sorted(workspace.iterdir()) if workspace.exists() else []:
-        if not child.is_dir():
+        try:
+            child_stat = child.lstat()
+            resolved_child = child.resolve(strict=True)
+        except OSError:
             continue
-        info = git_info(child)
+        if (
+            is_reparse_point(child)
+            or not stat_module.S_ISDIR(child_stat.st_mode)
+            or not is_lexically_relative_to(resolved_child, workspace)
+        ):
+            continue
+        info = git_info(resolved_child)
         if info:
-            info["path"] = rel(child, workspace)
+            info["path"] = rel(resolved_child, workspace)
             repos.append(info)
 
     fingerprints = build_fingerprints(workspace, files)
@@ -1159,6 +1542,7 @@ def render_background_md(background: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 def write_background(paths: AgentPaths, background: dict[str, Any]) -> tuple[Path, Path]:
+    safe_project_id(str(background.get("project_id", "")))
     pdir = project_dir(paths, background["project_id"])
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "logs").mkdir(exist_ok=True)
@@ -1172,8 +1556,27 @@ def write_background(paths: AgentPaths, background: dict[str, Any]) -> tuple[Pat
 def read_background(paths: AgentPaths, project: str) -> dict[str, Any] | None:
     path = background_path(paths, project)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        expected = safe_project_id(project)
+        actual = safe_project_id(str(value.get("project_id", ""))) if isinstance(value, dict) else ""
+        if actual != expected:
+            return None
+        workspace_value = value.get("workspace")
+        if not isinstance(workspace_value, str) or not workspace_value.strip():
+            return None
+        workspace, _ = resolve_managed_workspace(
+            workspace_value,
+            must_exist=True,
+            workspace_root=paths.workspace_root,
+        )
+        if workspace is None:
+            return None
+        # Downstream consumers receive only the canonical path that was just
+        # checked, never the serialized path that may have been rebound.
+        validated = dict(value)
+        validated["workspace"] = str(workspace)
+        return validated
+    except (OSError, json.JSONDecodeError, ValueError):
         return None
 
 def append_run(paths: AgentPaths, project: str, item: dict[str, Any]) -> None:
@@ -1224,21 +1627,26 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content.rstrip() + "\n", encoding="utf-8")
 
 def run_agentctl(args: argparse.Namespace, agentctl_args: list[str]) -> dict[str, Any]:
-    agentctl = Path(args.agentctl)
-    if agentctl.suffix.lower() != ".py":
+    agentctl, trust_failure = trusted_agentctl()
+    if agentctl is None:
         return result(
             False,
             "agentctl",
             126,
-            first_failure=f"Agent control entry must be Python: {agentctl}",
+            capability_available=False,
+            first_failure=trust_failure,
         )
     command = [sys.executable, str(agentctl), *agentctl_args, "--json"]
+    environment = os.environ.copy()
+    environment.pop("EMBEDDED_AGENTCTL", None)
+    environment.pop("EMBEDDED_SDK_MANAGER", None)
     try:
         completed = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            env=environment,
         )
     except OSError as exc:
         return result(

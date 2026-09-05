@@ -31,12 +31,18 @@ def _append_option(command: list[str], name: str, value: Any) -> None:
         command.extend([name, str(value)])
 
 
-def _common_tool_args(args: argparse.Namespace) -> list[str]:
+def _common_tool_args(args: argparse.Namespace, dll: Path | None) -> list[str]:
     values = ["--driver", args.driver, "--channel", str(args.channel), "--bitrate", str(args.bitrate)]
-    _append_option(values, "--dll", args.dll)
+    _append_option(values, "--dll", dll)
     _append_option(values, "--device-model", args.device_model)
     _append_option(values, "--device-index", args.device_index)
     return values
+
+
+def _trusted_dll(middleware: Any, args: argparse.Namespace) -> Path | None:
+    """Resolve task input against the Runtime-owned machine configuration."""
+
+    return middleware.require_trusted_driver_path(args.driver, getattr(args, "dll", None))
 
 
 def _run_tool(
@@ -108,8 +114,12 @@ def command_can(args: argparse.Namespace) -> int:
         else:
             value = result(bool(inventory["ready"]), operation, 0 if inventory["ready"] else 1, driver=inventory, first_failure=None if inventory["ready"] else "; ".join(inventory["blockers"]))
     elif args.can_action == "device-probe":
-        inventory = middleware.driver_inventory(args.driver)[0]
-        dll = args.dll or inventory.get("dll")
+        try:
+            dll = _trusted_dll(middleware, args)
+        except RuntimeError as exc:
+            value = result(False, operation, 2, driver=args.driver, first_failure=str(exc))
+            print_result(value, args.json)
+            return 2
         models = args.device_model or [str(item) for item in CAN_DEVICE_MODELS[args.driver]]
         indexes = args.device_index or [0, 1, 2]
         probe_tool = CAN_PROBE_TOOLS.get(args.driver)
@@ -123,7 +133,7 @@ def command_can(args: argparse.Namespace) -> int:
                 [
                     "discover",
                     "-Dll",
-                    dll,
+                    str(dll),
                     "-DevTypes",
                     ",".join(models),
                     "-DevIndexes",
@@ -139,7 +149,7 @@ def command_can(args: argparse.Namespace) -> int:
                     operation,
                     backend["exit_code"],
                     driver=args.driver,
-                    dll=dll,
+                    dll=str(dll),
                     backend=backend,
                     first_failure=backend.get("first_failure"),
                 )
@@ -147,7 +157,7 @@ def command_can(args: argparse.Namespace) -> int:
                 try:
                     probe = _parse_backend_json(backend["stdout"]) if backend.get("stdout") else {}
                 except ValueError as exc:
-                    value = result(False, operation, 1, driver=args.driver, dll=dll, backend=backend, first_failure=str(exc))
+                    value = result(False, operation, 1, driver=args.driver, dll=str(dll), backend=backend, first_failure=str(exc))
                     print_result(value, args.json)
                     return 1
                 matches = [
@@ -160,7 +170,7 @@ def command_can(args: argparse.Namespace) -> int:
                     operation,
                     0 if matches else 1,
                     driver=args.driver,
-                    dll=dll,
+                    dll=str(dll),
                     candidates={"device_models": models, "device_indexes": indexes},
                     matches=matches,
                     backend=backend,
@@ -170,21 +180,31 @@ def command_can(args: argparse.Namespace) -> int:
         backend = _run_tool(args, ["self-test"], args.timeout)
         value = result(bool(backend["ok"]), operation, backend["exit_code"], backend=backend, first_failure=backend.get("first_failure"))
     elif args.can_action == "check-env":
-        backend = _run_tool(args, ["check-env", *_common_tool_args(args)], args.timeout)
-        value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, backend=backend, first_failure=backend.get("first_failure"))
+        try:
+            dll = _trusted_dll(middleware, args)
+        except RuntimeError as exc:
+            value = result(False, operation, 2, driver=args.driver, first_failure=str(exc))
+        else:
+            backend = _run_tool(args, ["check-env", *_common_tool_args(args, dll)], args.timeout)
+            value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, backend=backend, first_failure=backend.get("first_failure"))
     elif args.can_action == "monitor":
         if args.duration is None and args.count is None:
             value = result(False, operation, 2, first_failure="CAN monitor requires --duration or --count so the operation is bounded")
         else:
-            tool_args = ["monitor", *_common_tool_args(args)]
-            _append_option(tool_args, "--duration", args.duration)
-            _append_option(tool_args, "--count", args.count)
-            for can_id in args.can_id:
-                tool_args.extend(["--id", can_id])
-            for can_id in args.exclude_id:
-                tool_args.extend(["--exclude-id", can_id])
-            backend = _run_tool(args, tool_args, args.timeout)
-            value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, backend=backend, first_failure=backend.get("first_failure"))
+            try:
+                dll = _trusted_dll(middleware, args)
+            except RuntimeError as exc:
+                value = result(False, operation, 2, driver=args.driver, first_failure=str(exc))
+            else:
+                tool_args = ["monitor", *_common_tool_args(args, dll)]
+                _append_option(tool_args, "--duration", args.duration)
+                _append_option(tool_args, "--count", args.count)
+                for can_id in args.can_id:
+                    tool_args.extend(["--id", can_id])
+                for can_id in args.exclude_id:
+                    tool_args.extend(["--exclude-id", can_id])
+                backend = _run_tool(args, tool_args, args.timeout)
+                value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, backend=backend, first_failure=backend.get("first_failure"))
     else:
         if args.can_action == "uds-ecu" and args.idle_timeout is None and args.max_requests is None:
             value = result(False, operation, 2, first_failure="CAN UDS ECU requires --idle-timeout or --max-requests so the operation is bounded")
@@ -194,22 +214,27 @@ def command_can(args: argparse.Namespace) -> int:
         if blocked:
             value = blocked
         else:
-            tool_args = [args.can_action, *_common_tool_args(args)]
-            if args.can_action == "send":
-                for frame in args.frame:
-                    tool_args.extend(["--frame", frame])
-                tool_args.extend(["--count", str(args.count), "--period-ms", str(args.period_ms)])
-            elif args.can_action == "uds-ecu":
-                tool_args.extend(["--rxid", args.rxid, "--txid", args.txid, "--profile", args.profile])
-                _append_option(tool_args, "--idle-timeout", args.idle_timeout)
-                _append_option(tool_args, "--max-requests", args.max_requests)
-            elif args.can_action == "uds-tester":
-                tool_args.extend(["--rxid", args.rxid, "--txid", args.txid, "--response-timeout", str(args.response_timeout)])
-                for request in args.request:
-                    tool_args.extend(["--request", request])
-                for expected in args.expect:
-                    tool_args.extend(["--expect", expected])
-            backend = _run_tool(args, tool_args, args.timeout)
-            value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, gate={"level": "L3", "requires_human_confirm": True, "confirmed": True}, backend=backend, first_failure=backend.get("first_failure"))
+            try:
+                dll = _trusted_dll(middleware, args)
+            except RuntimeError as exc:
+                value = result(False, operation, 2, driver=args.driver, first_failure=str(exc))
+            else:
+                tool_args = [args.can_action, *_common_tool_args(args, dll)]
+                if args.can_action == "send":
+                    for frame in args.frame:
+                        tool_args.extend(["--frame", frame])
+                    tool_args.extend(["--count", str(args.count), "--period-ms", str(args.period_ms)])
+                elif args.can_action == "uds-ecu":
+                    tool_args.extend(["--rxid", args.rxid, "--txid", args.txid, "--profile", args.profile])
+                    _append_option(tool_args, "--idle-timeout", args.idle_timeout)
+                    _append_option(tool_args, "--max-requests", args.max_requests)
+                elif args.can_action == "uds-tester":
+                    tool_args.extend(["--rxid", args.rxid, "--txid", args.txid, "--response-timeout", str(args.response_timeout)])
+                    for request in args.request:
+                        tool_args.extend(["--request", request])
+                    for expected in args.expect:
+                        tool_args.extend(["--expect", expected])
+                backend = _run_tool(args, tool_args, args.timeout)
+                value = result(bool(backend["ok"]), operation, backend["exit_code"], driver=args.driver, gate={"level": "L3", "requires_human_confirm": True, "confirmed": True}, backend=backend, first_failure=backend.get("first_failure"))
     print_result(value, args.json)
     return int(value["exit_code"])

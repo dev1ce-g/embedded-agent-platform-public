@@ -115,7 +115,13 @@ class GitSwitchTests(unittest.TestCase):
         value = json.loads(output.getvalue())
 
         self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            value["platform_version"],
+            (Path(__file__).resolve().parents[4] / "VERSION").read_text(encoding="utf-8").strip(),
+        )
         self.assertEqual(value["runtime_contract_version"], embedded_agent.RUNTIME_CONTRACT_VERSION)
+        self.assertEqual(value["supported_contract_versions"], ["1.0.0"])
+        self.assertEqual(value["result_schema_version"], "embedded-capability-result/v1")
         agent_file = next(item for item in value["runtime_files"] if item["path"].endswith("embedded_agent.py"))
         self.assertTrue(agent_file["exists"])
         self.assertEqual(len(agent_file["sha256"]), 64)

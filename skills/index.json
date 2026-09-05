@@ -5,7 +5,7 @@
       "id": "embedded-can-runtime",
       "name": "Embedded CAN Runtime",
       "path": "skills/embedded-can-runtime",
-      "runtime_contract": "0.8.0",
+      "runtime_contract": "1.0.0",
       "tags": ["embedded", "can", "uds", "windows-runtime"]
     }
   ]

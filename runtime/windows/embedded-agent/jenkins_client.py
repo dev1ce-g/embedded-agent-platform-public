@@ -20,6 +20,8 @@ from typing import Any
 
 
 DEFAULT_TIMEOUT = 20
+CONNECTION_REGISTRY_SCHEMA_VERSION = "embedded-jenkins-connections/v1"
+CONNECTION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 SECRET_KEY_RE = re.compile(r"pass(word|wd)?|token|secret|credential", re.IGNORECASE)
 USER_KEY_RE = re.compile(r"user(name)?|account|login|name", re.IGNORECASE)
 
@@ -37,6 +39,38 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     if port is None:
         port = 443 if parsed.scheme.lower() == "https" else 80 if parsed.scheme.lower() == "http" else None
     return parsed.scheme.lower(), parsed.hostname.lower() if parsed.hostname else None, port
+
+
+def _normalized_server(value: Any) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 2048:
+        raise JenkinsError("INVALID_CONNECTION", "Configured Jenkins server must be a non-empty URL")
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise JenkinsError("INVALID_CONNECTION", "Configured Jenkins server contains control characters")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        origin = _origin(value)
+    except ValueError:
+        raise JenkinsError("INVALID_CONNECTION", "Configured Jenkins server URL is invalid") from None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or origin[2] is None
+    ):
+        raise JenkinsError(
+            "INVALID_CONNECTION",
+            "Configured Jenkins server must be HTTP(S) without credentials, query or fragment",
+        )
+    return value.rstrip("/")
+
+
+def default_connection_registry_path() -> Path:
+    """Return the machine-owned registry path; callers cannot override it in the CLI."""
+    return Path(__file__).resolve().parents[1] / "jenkins-connections.json"
 
 
 class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -123,9 +157,76 @@ class Credentials:
     config_format: str
 
 
+@dataclass(frozen=True)
+class JenkinsConnection:
+    connection_id: str
+    server: str
+    credential_config: Path
+
+
+def load_jenkins_connection(path: Path, connection_id: str) -> JenkinsConnection:
+    """Resolve an opaque id to one trusted server/credential binding."""
+    if not isinstance(connection_id, str) or not CONNECTION_ID_RE.fullmatch(connection_id):
+        raise JenkinsError("INVALID_CONNECTION_ID", "Connection id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+    if not path.is_absolute():
+        raise JenkinsError("INVALID_CONNECTION_REGISTRY", "Jenkins connection registry path must be absolute")
+    if path.is_symlink():
+        raise JenkinsError("INVALID_CONNECTION_REGISTRY", "Jenkins connection registry must not be a symbolic link")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        raise JenkinsError("CONNECTION_REGISTRY_NOT_FOUND", "Jenkins connection registry is not configured") from None
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise JenkinsError("INVALID_CONNECTION_REGISTRY", "Jenkins connection registry cannot be read as JSON") from None
+    if not isinstance(document, dict) or set(document) != {"schema_version", "connections"}:
+        raise JenkinsError("INVALID_CONNECTION_REGISTRY", "Jenkins connection registry has unsupported fields")
+    if document.get("schema_version") != CONNECTION_REGISTRY_SCHEMA_VERSION:
+        raise JenkinsError(
+            "INVALID_CONNECTION_REGISTRY",
+            f"Jenkins connection registry schema must be {CONNECTION_REGISTRY_SCHEMA_VERSION}",
+        )
+    connections = document.get("connections")
+    if not isinstance(connections, dict):
+        raise JenkinsError("INVALID_CONNECTION_REGISTRY", "Jenkins connection registry connections must be an object")
+    entry = connections.get(connection_id)
+    if entry is None:
+        raise JenkinsError("CONNECTION_NOT_FOUND", f"Jenkins connection is not configured: {connection_id}")
+    if not isinstance(entry, dict) or set(entry) != {"server", "credential_config"}:
+        raise JenkinsError("INVALID_CONNECTION", f"Jenkins connection has unsupported fields: {connection_id}")
+    server = _normalized_server(entry.get("server"))
+    credential_value = entry.get("credential_config")
+    if (
+        not isinstance(credential_value, str)
+        or not credential_value
+        or credential_value != credential_value.strip()
+        or any(character in credential_value for character in ("\x00", "\r", "\n"))
+    ):
+        raise JenkinsError("INVALID_CONNECTION", f"Jenkins credential config is invalid: {connection_id}")
+    credential_config = Path(credential_value).expanduser()
+    if not credential_config.is_absolute():
+        raise JenkinsError("INVALID_CONNECTION", f"Jenkins credential config must be an absolute path: {connection_id}")
+    return JenkinsConnection(connection_id, server, credential_config)
+
+
+def url_matches_connection_origin(url: str, connection: JenkinsConnection) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return (
+            parsed.scheme.lower() in {"http", "https"}
+            and bool(parsed.netloc)
+            and parsed.username is None
+            and parsed.password is None
+            and _origin(url) == _origin(connection.server)
+        )
+    except ValueError:
+        return False
+
+
 def load_sdk_credentials(path: Path, server: str) -> Credentials:
+    if path.is_symlink():
+        raise JenkinsError("CREDENTIAL_CONFIG_INVALID", "Configured Jenkins credential file must not be a symbolic link")
     if not path.is_file():
-        raise JenkinsError("CREDENTIAL_CONFIG_NOT_FOUND", f"Credential config not found: {path}")
+        raise JenkinsError("CREDENTIAL_CONFIG_NOT_FOUND", "Configured Jenkins credential file was not found")
     config_format, values = _parse_config(path)
     user_candidates = sorted(values, key=lambda key: _score_key(key, server, USER_KEY_RE), reverse=True)
     secret_candidates = sorted(values, key=lambda key: _score_key(key, server, SECRET_KEY_RE), reverse=True)
@@ -141,10 +242,17 @@ def load_sdk_credentials(path: Path, server: str) -> Credentials:
 
 
 class JenkinsClient:
-    def __init__(self, server: str, credentials: Credentials, timeout: int = DEFAULT_TIMEOUT):
-        self.server = server.rstrip("/")
+    def __init__(
+        self,
+        server: str,
+        credentials: Credentials,
+        timeout: int = DEFAULT_TIMEOUT,
+        connection_id: str | None = None,
+    ):
+        self.server = _normalized_server(server)
         self.credentials = credentials
         self.timeout = timeout
+        self.connection_id = connection_id
         token = f"{credentials.username}:{credentials.password}".encode("utf-8")
         import base64
         self.authorization = "Basic " + base64.b64encode(token).decode("ascii")
@@ -156,6 +264,13 @@ class JenkinsClient:
 
     def request(self, path: str, method: str = "GET", data: dict[str, Any] | None = None, crumb: bool = False) -> tuple[Any, dict[str, str]]:
         url = path if path.startswith("http") else self.server + "/" + path.lstrip("/")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            request_origin = _origin(url)
+        except ValueError:
+            raise JenkinsError("INVALID_REQUEST_URL", "Jenkins request URL is invalid") from None
+        if parsed.username is not None or parsed.password is not None or request_origin != _origin(self.server):
+            raise JenkinsError("REQUEST_ORIGIN_NOT_ALLOWED", "Authenticated Jenkins request must use the configured server origin")
         headers = {"Authorization": self.authorization, "Accept": "application/json"}
         if crumb:
             crumb_data, _ = self.request("/crumbIssuer/api/json")
@@ -164,6 +279,8 @@ class JenkinsClient:
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
+                if _origin(response.geturl()) != _origin(self.server):
+                    raise JenkinsError("REDIRECT_NOT_ALLOWED", "Authenticated request redirected to another origin")
                 raw = response.read()
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
         except urllib.error.HTTPError as exc:
@@ -195,10 +312,19 @@ class JenkinsClient:
         expected_sha256: str,
         max_bytes: int,
     ) -> dict[str, Any]:
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username is not None:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            artifact_origin = _origin(url)
+        except ValueError:
+            raise JenkinsError("INVALID_ARTIFACT_URL", "Artifact URL must be a valid HTTP(S) URL") from None
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
             raise JenkinsError("INVALID_ARTIFACT_URL", "Artifact URL must be HTTP(S) without embedded credentials")
-        if _origin(url) != _origin(self.server):
+        if artifact_origin != _origin(self.server):
             raise JenkinsError("ARTIFACT_ORIGIN_NOT_ALLOWED", "Artifact URL must use the configured server origin")
 
         request = urllib.request.Request(
@@ -209,8 +335,7 @@ class JenkinsClient:
         temp_path: Path | None = None
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
-                final_url = urllib.parse.urlsplit(response.geturl())
-                if _origin(final_url.geturl()) != _origin(self.server):
+                if _origin(response.geturl()) != _origin(self.server):
                     raise JenkinsError("ARTIFACT_REDIRECT_NOT_ALLOWED", "Artifact download redirected to another origin")
                 content_length = response.headers.get("Content-Length")
                 if content_length and int(content_length) > max_bytes:
@@ -311,7 +436,19 @@ class JenkinsClient:
         location = headers.get("location")
         if not location:
             raise JenkinsError("QUEUE_LOCATION_MISSING", "Jenkins accepted the request without a queue location")
-        return {"queue_url": location}
+        queue_url = location if location.lower().startswith(("http://", "https://")) else self.server + "/" + location.lstrip("/")
+        try:
+            parsed = urllib.parse.urlsplit(queue_url)
+            queue_origin = _origin(queue_url)
+        except ValueError:
+            raise JenkinsError("QUEUE_LOCATION_NOT_ALLOWED", "Jenkins returned an invalid queue location") from None
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or queue_origin != _origin(self.server)
+        ):
+            raise JenkinsError("QUEUE_LOCATION_NOT_ALLOWED", "Jenkins queue location must use the configured server origin")
+        return {"queue_url": queue_url}
 
     def wait_for_build_number(self, queue_url: str, timeout: int = 120) -> int:
         deadline = time.monotonic() + timeout

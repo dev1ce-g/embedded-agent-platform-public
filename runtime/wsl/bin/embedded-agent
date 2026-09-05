@@ -3,8 +3,6 @@ set -euo pipefail
 
 windows_prefix_wsl="${WSL_EMBEDDED_AGENT_PREFIX:-}"
 windows_script_wsl="${WSL_EMBEDDED_AGENT_SCRIPT:-${windows_prefix_wsl:+${windows_prefix_wsl}/bin/embedded-agent.py}}"
-windows_root_wsl="${WSL_EMBEDDED_AGENT_ROOT:-${windows_prefix_wsl:+${windows_prefix_wsl}/state}}"
-windows_agentctl_wsl="${WSL_EMBEDDED_AGENTCTL:-${windows_prefix_wsl:+${windows_prefix_wsl}/bin/agentctl.py}}"
 windows_cmd="${WSL_WINDOWS_CMD:-/mnt/c/Windows/System32/cmd.exe}"
 
 fail() {
@@ -13,11 +11,25 @@ fail() {
     python3 - "$message" <<'PY'
 import json
 import sys
+from datetime import datetime, timezone
 
 print(json.dumps({
+    "schema_version": "embedded-capability-result/v1",
+    "contract_version": "1.0.0",
+    "capability_id": "agent.transport",
+    "phase": "execute",
+    "state": "failed",
     "ok": False,
     "operation": "agent-transport",
     "exit_code": 127,
+    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "evidence": [],
+    "error": {
+        "code": "WSL_WINDOWS_INTEROP_UNAVAILABLE",
+        "category": "availability",
+        "message": sys.argv[1],
+        "retryable": True,
+    },
     "error_code": "WSL_WINDOWS_INTEROP_UNAVAILABLE",
     "first_failure": sys.argv[1],
 }, ensure_ascii=False, separators=(",", ":")))
@@ -28,7 +40,7 @@ PY
   exit 127
 }
 
-[[ -n "$windows_prefix_wsl" || ( -n "$windows_script_wsl" && -n "$windows_root_wsl" && -n "$windows_agentctl_wsl" ) ]] || fail "Set WSL_EMBEDDED_AGENT_PREFIX to the Windows install root" "$@"
+[[ -n "$windows_script_wsl" ]] || fail "Set WSL_EMBEDDED_AGENT_PREFIX to the Windows install root" "$@"
 [[ -f "$windows_script_wsl" ]] || fail "Windows embedded-agent entry not found: $windows_script_wsl" "$@"
 [[ -x "$windows_cmd" ]] || fail "Windows cmd.exe not found: $windows_cmd" "$@"
 
@@ -42,19 +54,12 @@ fi
 [[ -x "$windows_py" ]] || fail "Windows Python launcher is not executable: $windows_py" "$@"
 
 windows_script="$(wslpath -w "$windows_script_wsl")"
-windows_root="$(wslpath -w "$windows_root_wsl")"
-windows_agentctl="$(wslpath -w "$windows_agentctl_wsl")"
-payload="$(python3 - "$windows_script" "$windows_root" "$windows_agentctl" "$@" <<'PY'
+payload="$(python3 - "$@" <<'PY'
 import base64
 import json
 import sys
 
-value = {
-    "script": sys.argv[1],
-    "root": sys.argv[2],
-    "agentctl": sys.argv[3],
-    "args": sys.argv[4:],
-}
+value = {"args": sys.argv[1:]}
 encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 print(base64.b64encode(encoded).decode("ascii"))
 PY

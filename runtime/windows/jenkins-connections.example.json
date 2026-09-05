@@ -1,0 +1,9 @@
+{
+  "schema_version": "embedded-jenkins-connections/v1",
+  "connections": {
+    "firmware-ci": {
+      "server": "https://jenkins.example.com",
+      "credential_config": "C:\\Users\\YOUR_NAME\\.config\\embedded-agent\\jenkins-credentials.json"
+    }
+  }
+}

@@ -38,9 +38,12 @@ def build_knowledge(paths: AgentPaths, background: dict[str, Any]) -> dict[str, 
         ),
         {},
     )
-    build_backend = backend_of(latest_build_ok or latest_build)
-    flash_backend = backend_of(latest_flash_ok or latest_flash)
-    rtt_backend = backend_of(latest_rtt_ok or latest_rtt)
+    # Keep every derived "latest" record internally consistent.  An older
+    # successful artifact must never be paired with the outcome of a newer
+    # failed run; historical successes remain available through runs.jsonl.
+    build_backend = backend_of(latest_build)
+    flash_backend = backend_of(latest_flash)
+    rtt_backend = backend_of(latest_rtt)
     rtt_fail_backend = backend_of(latest_rtt_fail)
 
     build_artifact = build_backend.get("artifact")
@@ -364,19 +367,6 @@ def read_knowledge_summary(paths: AgentPaths, project: str) -> dict[str, Any] | 
         "knowledge_dir": str(kdir),
     }
 
-def copy_tree(src: Path, dst: Path) -> list[str]:
-    written: list[str] = []
-    if not src.exists():
-        return written
-    dst.mkdir(parents=True, exist_ok=True)
-    for path in sorted(src.iterdir(), key=lambda item: item.name):
-        if not path.is_file():
-            continue
-        target = dst / path.name
-        target.write_bytes(path.read_bytes())
-        written.append(str(target))
-    return written
-
 def command_status(args: argparse.Namespace) -> int:
     paths = agent_paths(args.root)
     runtime_files = []
@@ -399,7 +389,10 @@ def command_status(args: argparse.Namespace) -> int:
         jobs=str(paths.jobs),
         agentctl=str(args.agentctl),
         python=sys.version.split()[0],
+        platform_version=platform_version(),
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+        supported_contract_versions=[CAPABILITY_CONTRACT_VERSION],
+        result_schema_version=CAPABILITY_RESULT_SCHEMA_VERSION,
         runtime_files=runtime_files,
     )
     print_result(value, args.json)
@@ -412,12 +405,28 @@ def command_project(args: argparse.Namespace) -> int:
             value = result(False, "project-discover", 2, first_failure="Missing --workspace")
             print_result(value, args.json)
             return 2
+        workspace, workspace_failure = resolve_managed_workspace(
+            args.workspace,
+            must_exist=True,
+        )
+        if workspace is None:
+            value = result(
+                False,
+                "project-discover",
+                5,
+                project_id=safe_project_id(args.project),
+                workspace=args.workspace,
+                blocked=True,
+                first_failure=workspace_failure or "Workspace is not allowed",
+            )
+            print_result(value, args.json)
+            return 5
         selected_keil_project = args.mcu_keil_project
         selection_source = "explicit" if selected_keil_project else None
         if not selected_keil_project:
             existing = read_background(paths, args.project)
             existing_workspace = str((existing or {}).get("workspace", "")).replace("\\", "/").lower()
-            requested_workspace = str(Path(args.workspace).resolve()).replace("\\", "/").lower()
+            requested_workspace = str(workspace).replace("\\", "/").lower()
             if existing_workspace == requested_workspace:
                 existing_build = (existing or {}).get("targets", {}).get("mcu", {}).get("build", {})
                 if existing_build.get("selection_source") in {"explicit", "existing_background"}:
@@ -426,7 +435,7 @@ def command_project(args: argparse.Namespace) -> int:
                     selection_source = "existing_background"
         background = discover_background(
             args.project,
-            Path(args.workspace),
+            workspace,
             mcu_keil_project=selected_keil_project,
             selection_source=selection_source,
         )
@@ -550,27 +559,6 @@ def command_knowledge(args: argparse.Namespace) -> int:
             print_result(value, args.json)
             return 2
         print_result(result(True, "knowledge-show", project_id=background["project_id"], **summary), args.json)
-        return 0
-
-    if args.knowledge_action == "export":
-        summary = read_knowledge_summary(paths, background["project_id"])
-        if not summary:
-            value = result(False, "knowledge-export", 2, project_id=background["project_id"], first_failure="Knowledge not found; run knowledge build --write first")
-            print_result(value, args.json)
-            return 2
-        target = Path(args.to).expanduser()
-        written = copy_tree(knowledge_dir(paths, background["project_id"]), target)
-        print_result(
-            result(
-                True,
-                "knowledge-export",
-                project_id=background["project_id"],
-                source=str(knowledge_dir(paths, background["project_id"])),
-                target=str(target),
-                written=written,
-            ),
-            args.json,
-        )
         return 0
 
     print_result(result(False, "knowledge", 2, first_failure=f"Unknown action: {args.knowledge_action}"), args.json)

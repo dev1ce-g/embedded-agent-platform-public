@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from embedded_runtime_common import DEFAULT_INSTALL_ROOT, decode_text, is_relative_to, now_iso, result, sha256_file
+from embedded_runtime_common import (
+    decode_text,
+    ensure_workspace_output_directory,
+    is_relative_to,
+    now_iso,
+    result,
+    sha256_file,
+    validated_workspace_output_path,
+)
 
 
-DEFAULT_ABOOT_ROOT = Path(os.environ.get("EMBEDDED_ABOOT_ROOT", str(DEFAULT_INSTALL_ROOT / "tools" / "aboot")))
-DEFAULT_FIRMWARE_ROOT = Path(os.environ.get("EMBEDDED_FIRMWARE_ROOT", str(DEFAULT_INSTALL_ROOT / "firmware")))
+ABOOT_CONNECTIONS_PATH = Path(__file__).resolve().parents[1] / "aboot-connections.json"
+ABOOT_CONNECTIONS_SCHEMA = "embedded-aboot-connections/v1"
+ABOOT_CONNECTION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}\Z")
+MAX_ABOOT_CONNECTIONS_BYTES = 64 * 1024
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 ABOOT_SUCCESS_PATTERN = re.compile(r"all finished\.\s*total time:", re.IGNORECASE)
 ABOOT_FAILURE_PATTERNS = (
     re.compile(r"\bfailed\b", re.IGNORECASE),
@@ -26,6 +42,101 @@ ABOOT_FAILURE_PATTERNS = (
 COM_PORT_PATTERN = re.compile(r"COM[1-9][0-9]{0,3}\Z", re.IGNORECASE)
 MAX_ABOOT_RESULT_BYTES = 256 * 1024
 MPU_RELEASE_MEMBER_PATTERN = re.compile(r"(?:^|/)package/mpu_build/[^/]+\.zip\Z", re.IGNORECASE)
+
+
+class AbootTrustError(RuntimeError):
+    """Raised when a machine-owned Aboot binding is not safe to execute."""
+
+
+@dataclass(frozen=True)
+class AbootConnection:
+    connection_id: str
+    registry: Path
+    downloader: Path
+    downloader_sha256: str
+    firmware_root: Path
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        int(getattr(info, "st_file_attributes", 0)) & FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+
+
+def _canonical_machine_path(path: Path, label: str, *, directory: bool) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise AbootTrustError(f"{label} must be an absolute path")
+    lexical = Path(os.path.abspath(str(expanded)))
+    for component in (lexical, *lexical.parents):
+        if _is_reparse(component):
+            raise AbootTrustError(f"{label} must not use a symlink or reparse point: {component}")
+    try:
+        canonical = lexical.resolve(strict=True)
+        info = canonical.stat()
+    except OSError as exc:
+        raise AbootTrustError(f"{label} is unavailable: {lexical}: {exc}") from exc
+    if not _same_path(lexical, canonical):
+        raise AbootTrustError(f"{label} must already be canonical: {lexical}")
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(info.st_mode):
+        kind = "directory" if directory else "regular file"
+        raise AbootTrustError(f"{label} must be a {kind}: {canonical}")
+    return canonical
+
+
+def load_aboot_connection(connection_id: str) -> AbootConnection:
+    if not isinstance(connection_id, str) or not ABOOT_CONNECTION_ID_PATTERN.fullmatch(connection_id):
+        raise AbootTrustError("Aboot connection id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+    registry = _canonical_machine_path(ABOOT_CONNECTIONS_PATH, "Aboot connection registry", directory=False)
+    if registry.stat().st_size > MAX_ABOOT_CONNECTIONS_BYTES:
+        raise AbootTrustError(f"Aboot connection registry exceeds {MAX_ABOOT_CONNECTIONS_BYTES} bytes")
+    try:
+        document = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AbootTrustError(f"Aboot connection registry is invalid: {exc}") from exc
+    if not isinstance(document, dict) or set(document) != {"schema_version", "connections"}:
+        raise AbootTrustError("Aboot connection registry has unsupported fields")
+    if document.get("schema_version") != ABOOT_CONNECTIONS_SCHEMA:
+        raise AbootTrustError(f"Aboot connection registry schema must be {ABOOT_CONNECTIONS_SCHEMA}")
+    connections = document.get("connections")
+    if not isinstance(connections, dict):
+        raise AbootTrustError("Aboot connection registry connections must be an object")
+    entry = connections.get(connection_id)
+    if not isinstance(entry, dict):
+        raise AbootTrustError(f"Aboot connection is not configured: {connection_id}")
+    if set(entry) != {"adownload", "adownload_sha256", "firmware_root"}:
+        raise AbootTrustError(f"Aboot connection has unsupported fields: {connection_id}")
+
+    downloader_value = entry.get("adownload")
+    firmware_value = entry.get("firmware_root")
+    expected_sha256 = entry.get("adownload_sha256")
+    if not isinstance(downloader_value, str) or not downloader_value.strip():
+        raise AbootTrustError(f"Aboot adownload path is invalid: {connection_id}")
+    if not isinstance(firmware_value, str) or not firmware_value.strip():
+        raise AbootTrustError(f"Aboot firmware root is invalid: {connection_id}")
+    if not isinstance(expected_sha256, str) or not SHA256_PATTERN.fullmatch(expected_sha256):
+        raise AbootTrustError(f"Aboot adownload SHA-256 is required: {connection_id}")
+
+    downloader = _canonical_machine_path(Path(downloader_value), "Aboot adownload.exe", directory=False)
+    if downloader.name.lower() != "adownload.exe":
+        raise AbootTrustError("Aboot executable must be named adownload.exe")
+    firmware_root = _canonical_machine_path(Path(firmware_value), "Aboot firmware root", directory=True)
+    try:
+        actual_sha256 = sha256_file(downloader)
+    except OSError as exc:
+        raise AbootTrustError(f"Aboot adownload.exe could not be hashed: {exc}") from exc
+    if actual_sha256 is None or actual_sha256.lower() != expected_sha256.lower():
+        raise AbootTrustError("Aboot adownload.exe SHA-256 does not match the machine registry")
+    return AbootConnection(connection_id, registry, downloader, actual_sha256, firmware_root)
 
 
 def aboot_file_info(path: Path) -> dict[str, Any]:
@@ -78,6 +189,34 @@ def resolve_workspace_path(workspace: Path, path: Path) -> Path:
     return (workspace / path).resolve()
 
 
+def _staging_policy_failure(
+    source_info: dict[str, Any],
+    failure: ValueError,
+    *,
+    selected_member: str | None = None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "blocked": True,
+        "source": source_info,
+        "first_failure": f"Unsafe Aboot staging path: {failure}",
+    }
+    if selected_member is not None:
+        fields["selected_member"] = selected_member
+    return result(False, "flash-mpu-aboot-stage", 5, **fields)
+
+
+def _exclusive_temporary_path(workspace: Path, destination: Path) -> Path:
+    relative = destination.relative_to(workspace.resolve(strict=True))
+    temporary_relative = relative.with_name(
+        f".{destination.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    )
+    return validated_workspace_output_path(
+        workspace,
+        temporary_relative,
+        label="Aboot staging temporary file",
+    )
+
+
 def extract_mpu_release_package(
     workspace: Path,
     source: Path,
@@ -104,17 +243,32 @@ def extract_mpu_release_package(
                 )
 
             member = candidates[0]
-            destination = (
-                workspace
-                / "_codex_builds"
+            destination_relative = (
+                Path("_embedded_builds")
                 / "flash-inputs"
                 / source_info["sha256"][:16]
                 / Path(member.filename).name
             )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
             try:
-                with archive.open(member) as package_input, temporary.open("wb") as package_output:
+                ensure_workspace_output_directory(
+                    workspace,
+                    destination_relative.parent,
+                    label="Aboot staging directory",
+                )
+                destination = validated_workspace_output_path(
+                    workspace,
+                    destination_relative,
+                    label="Aboot staged package",
+                )
+                temporary = _exclusive_temporary_path(workspace, destination)
+            except ValueError as exc:
+                return _staging_policy_failure(
+                    source_info,
+                    exc,
+                    selected_member=member.filename,
+                )
+            try:
+                with archive.open(member) as package_input, temporary.open("xb") as package_output:
                     shutil.copyfileobj(package_input, package_output)
                 if not zipfile.is_zipfile(temporary):
                     temporary.unlink(missing_ok=True)
@@ -126,7 +280,29 @@ def extract_mpu_release_package(
                         selected_member=member.filename,
                         first_failure="Selected MPU release package is not a valid ZIP archive",
                     )
+                destination = validated_workspace_output_path(
+                    workspace,
+                    destination_relative,
+                    label="Aboot staged package",
+                )
+                validated_workspace_output_path(
+                    workspace,
+                    temporary.relative_to(workspace.resolve(strict=True)),
+                    label="Aboot staging temporary file",
+                )
                 os.replace(temporary, destination)
+                destination = validated_workspace_output_path(
+                    workspace,
+                    destination_relative,
+                    label="Aboot staged package",
+                )
+            except ValueError as exc:
+                temporary.unlink(missing_ok=True)
+                return _staging_policy_failure(
+                    source_info,
+                    exc,
+                    selected_member=member.filename,
+                )
             except (OSError, zipfile.BadZipFile) as exc:
                 temporary.unlink(missing_ok=True)
                 return result(
@@ -159,7 +335,8 @@ def extract_mpu_release_package(
 
 
 def stage_aboot_package(workspace: Path, source: Path, firmware_root: Path) -> dict[str, Any]:
-    workspace = workspace.resolve()
+    workspace_input = Path(workspace)
+    workspace = workspace_input.resolve()
     source = resolve_workspace_path(workspace, source)
     firmware_root = resolve_workspace_path(workspace, firmware_root)
     if not source.is_file():
@@ -168,7 +345,7 @@ def stage_aboot_package(workspace: Path, source: Path, firmware_root: Path) -> d
         return result(False, "flash-mpu-aboot-stage", 2, first_failure="Aboot release package must be a valid ZIP archive")
     source_info = aboot_file_info(source)
     if is_relative_to(source, workspace):
-        nested_package = extract_mpu_release_package(workspace, source, source_info)
+        nested_package = extract_mpu_release_package(workspace_input, source, source_info)
         if nested_package is not None:
             return nested_package
         return result(
@@ -189,10 +366,27 @@ def stage_aboot_package(workspace: Path, source: Path, firmware_root: Path) -> d
             first_failure="External Aboot package must be under the configured firmware reference root",
         )
 
-    destination = workspace / "_codex_builds" / "flash-inputs" / source_info["sha256"][:16] / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_relative = (
+        Path("_embedded_builds")
+        / "flash-inputs"
+        / source_info["sha256"][:16]
+        / source.name
+    )
+    try:
+        ensure_workspace_output_directory(
+            workspace_input,
+            destination_relative.parent,
+            label="Aboot staging directory",
+        )
+        destination = validated_workspace_output_path(
+            workspace_input,
+            destination_relative,
+            label="Aboot staged package",
+        )
+    except ValueError as exc:
+        return _staging_policy_failure(source_info, exc)
     if destination.is_file() and sha256_file(destination) == source_info["sha256"]:
-        nested_package = extract_mpu_release_package(workspace, destination, source_info)
+        nested_package = extract_mpu_release_package(workspace_input, destination, source_info)
         if nested_package is not None:
             return nested_package
         return result(
@@ -205,21 +399,46 @@ def stage_aboot_package(workspace: Path, source: Path, firmware_root: Path) -> d
             staged_package=aboot_file_info(destination),
         )
 
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
     try:
-        shutil.copy2(source, temporary)
+        temporary = _exclusive_temporary_path(workspace_input, destination)
+    except ValueError as exc:
+        return _staging_policy_failure(source_info, exc)
+    try:
+        with source.open("rb") as package_input, temporary.open("xb") as package_output:
+            shutil.copyfileobj(package_input, package_output)
         copied_hash = sha256_file(temporary)
         if copied_hash != source_info["sha256"]:
             temporary.unlink(missing_ok=True)
             return result(False, "flash-mpu-aboot-stage", 1, source=source_info, first_failure="Staged Aboot package SHA-256 mismatch")
+        destination = validated_workspace_output_path(
+            workspace_input,
+            destination_relative,
+            label="Aboot staged package",
+        )
+        validated_workspace_output_path(
+            workspace_input,
+            temporary.relative_to(workspace),
+            label="Aboot staging temporary file",
+        )
         os.replace(temporary, destination)
+        destination = validated_workspace_output_path(
+            workspace_input,
+            destination_relative,
+            label="Aboot staged package",
+        )
+    except ValueError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return _staging_policy_failure(source_info, exc)
     except OSError as exc:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
         return result(False, "flash-mpu-aboot-stage", 1, source=source_info, first_failure=f"Cannot stage Aboot package: {exc}")
-    nested_package = extract_mpu_release_package(workspace, destination, source_info)
+    nested_package = extract_mpu_release_package(workspace_input, destination, source_info)
     if nested_package is not None:
         return nested_package
     return result(
@@ -237,7 +456,7 @@ def prepare_aboot_flash(
     *,
     workspace: Path,
     package: Path,
-    aboot_root: Path,
+    connection: AbootConnection,
     ports: list[str] | None,
     usb_only: bool,
     auto_enable: bool,
@@ -247,8 +466,19 @@ def prepare_aboot_flash(
 ) -> dict[str, Any]:
     workspace = workspace.resolve()
     package = resolve_workspace_path(workspace, package)
-    aboot_root = resolve_workspace_path(workspace, aboot_root)
-    downloader = aboot_root / "adownload.exe"
+    try:
+        downloader = _canonical_machine_path(connection.downloader, "Aboot adownload.exe", directory=False)
+        current_tool_sha256 = sha256_file(downloader)
+    except (AbootTrustError, OSError) as exc:
+        return result(False, "flash-mpu-aboot-preflight", 127, first_failure=str(exc))
+    if current_tool_sha256 is None or current_tool_sha256.lower() != connection.downloader_sha256.lower():
+        return result(
+            False,
+            "flash-mpu-aboot-preflight",
+            5,
+            blocked=True,
+            first_failure="Aboot adownload.exe changed after machine connection resolution",
+        )
 
     if not workspace.is_dir():
         return result(False, "flash-mpu-aboot-preflight", 2, first_failure=f"Workspace not found: {workspace}")
@@ -260,8 +490,6 @@ def prepare_aboot_flash(
         return result(False, "flash-mpu-aboot-preflight", 2, first_failure="Aboot release package is not a valid ZIP archive")
     if not is_relative_to(package, workspace):
         return result(False, "flash-mpu-aboot-preflight", 5, blocked=True, first_failure="Aboot release package must be inside the registered project workspace")
-    if not downloader.is_file():
-        return result(False, "flash-mpu-aboot-preflight", 127, first_failure=f"adownload.exe not found: {downloader}")
     if speed < 1200 or speed > 4_000_000:
         return result(False, "flash-mpu-aboot-preflight", 2, first_failure="Aboot speed must be between 1200 and 4000000")
 
@@ -294,6 +522,9 @@ def prepare_aboot_flash(
         package=aboot_file_info(package),
         tool=aboot_file_info(downloader),
         connection={
+            "connection_id": connection.connection_id,
+            "registry": str(connection.registry),
+            "firmware_root": str(connection.firmware_root),
             "ports": normalized_ports,
             "usb_only": usb_only,
             "auto_enable": auto_enable,
@@ -328,8 +559,7 @@ def run_aboot_flash(
     *,
     workspace: Path,
     package: Path,
-    aboot_root: Path,
-    firmware_root: Path,
+    connection_id: str,
     ports: list[str] | None,
     usb_only: bool,
     auto_enable: bool,
@@ -339,14 +569,24 @@ def run_aboot_flash(
     timeout: int,
     log_dir: Path,
 ) -> dict[str, Any]:
-    staging = stage_aboot_package(workspace, package, firmware_root)
+    try:
+        machine_connection = load_aboot_connection(connection_id)
+    except AbootTrustError as exc:
+        return result(
+            False,
+            "flash-mpu-aboot-preflight",
+            127,
+            connection_id=connection_id,
+            first_failure=str(exc),
+        )
+    staging = stage_aboot_package(workspace, package, machine_connection.firmware_root)
     if not staging.get("ok"):
         return staging
     staged_package = Path(staging["package_path"])
     preflight = prepare_aboot_flash(
         workspace=workspace,
         package=staged_package,
-        aboot_root=aboot_root,
+        connection=machine_connection,
         ports=ports,
         usb_only=usb_only,
         auto_enable=auto_enable,
@@ -363,12 +603,39 @@ def run_aboot_flash(
     started_at = now_iso()
     started = time.monotonic()
     process: subprocess.Popen[bytes] | None = None
+    downloader = machine_connection.downloader
+    current_downloader = downloader
+    try:
+        current_downloader = _canonical_machine_path(downloader, "Aboot adownload.exe", directory=False)
+        current_tool_sha256 = sha256_file(current_downloader)
+    except AbootTrustError as exc:
+        current_tool_sha256 = None
+        trust_failure = str(exc)
+    else:
+        trust_failure = "Aboot adownload.exe changed before process start"
+    if (
+        current_tool_sha256 is None
+        or not _same_path(current_downloader, downloader)
+        or current_tool_sha256.lower() != machine_connection.downloader_sha256.lower()
+    ):
+        return result(
+            False,
+            "flash-mpu-aboot",
+            5,
+            started_at=started_at,
+            ended_at=now_iso(),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            preflight=preflight,
+            staging=staging,
+            blocked=True,
+            first_failure=trust_failure,
+        )
     try:
         with log_path.open("wb") as output:
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             process = subprocess.Popen(
                 preflight["command"],
-                cwd=str(aboot_root.resolve()),
+                cwd=str(downloader.parent),
                 stdin=subprocess.DEVNULL,
                 stdout=output,
                 stderr=subprocess.STDOUT,

@@ -6,7 +6,22 @@ from embedded_runtime_common import *
 
 def git_clone(args: argparse.Namespace) -> int:
     operation = "git-clone"
-    workspace = Path(args.workspace).expanduser().resolve()
+    workspace, workspace_failure = resolve_managed_workspace(
+        args.workspace,
+        must_exist=False,
+    )
+    if workspace is None:
+        value = result(
+            False,
+            operation,
+            5,
+            workspace=args.workspace,
+            path=args.path,
+            blocked=True,
+            first_failure=workspace_failure or "Workspace is not allowed",
+        )
+        print_result(value, args.json)
+        return 5
     commit = getattr(args, "commit", None)
     branch = getattr(args, "branch", None)
     target, target_failure = clone_target(workspace, args.path)
@@ -679,12 +694,49 @@ def git_show(args: argparse.Namespace, background: dict[str, Any]) -> int:
         print_result(failure, args.json)
         return int(failure["exit_code"])
     assert repo is not None
+    rev = args.rev
+    if (
+        not isinstance(rev, str)
+        or not rev
+        or len(rev) > 256
+        or rev.startswith("-")
+        or any(character in rev for character in ("\x00", "\r", "\n"))
+    ):
+        value = result(
+            False,
+            "git-show",
+            2,
+            **git_repo_context(background, repo, info),
+            rev=rev,
+            first_failure="Git revision must be a bounded revision name and must not start with '-'",
+        )
+        print_result(value, args.json)
+        return 2
+    verified = run_git_read(
+        repo,
+        ["rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}"],
+        max_bytes=1024,
+        timeout=args.timeout,
+    )
+    commit = verified["stdout"].strip() if verified["ok"] else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        value = result(
+            False,
+            "git-show",
+            verified["exit_code"] or 2,
+            **git_repo_context(background, repo, info),
+            rev=rev,
+            stderr=verified["stderr"],
+            first_failure=verified["first_failure"] or "Git revision did not resolve to one commit",
+        )
+        print_result(value, args.json)
+        return int(value["exit_code"])
     git_args = ["show", "--no-ext-diff", "--decorate=short"]
     if args.stat:
         git_args.append("--stat")
     if args.no_patch:
         git_args.append("--no-patch")
-    git_args.append(args.rev)
+    git_args.extend(["--end-of-options", commit])
     shown = run_git_read(repo, git_args, max_bytes=max(1, args.max_bytes), timeout=args.timeout)
     ok = shown["exit_code"] == 0
     value = result(
@@ -692,7 +744,8 @@ def git_show(args: argparse.Namespace, background: dict[str, Any]) -> int:
         "git-show",
         0 if ok else shown["exit_code"],
         **git_repo_context(background, repo, info),
-        rev=args.rev,
+        rev=rev,
+        commit=commit.lower(),
         content=shown["stdout"],
         stdout_bytes=shown["stdout_bytes"],
         stderr=shown["stderr"],

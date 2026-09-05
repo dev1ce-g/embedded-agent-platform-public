@@ -19,6 +19,35 @@ def default_jlink() -> str:
     return str(Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "SEGGER" / "JLink" / "JLink.exe")
 
 
+def flash_commands(
+    device: str,
+    interface: str,
+    speed: str,
+    address: str,
+    binary: Path,
+    no_run: bool,
+) -> tuple[list[str], dict[str, str]]:
+    normalized = {
+        "device": jlink_device_token(device),
+        "interface": jlink_interface_token(interface),
+        "speed": jlink_speed_token(speed),
+        "address": jlink_address_token(address, "JLink flash address"),
+    }
+    binary_token = jlink_script_path(binary, "JLink binary path")
+    commands = [
+        f"device {normalized['device']}",
+        f"si {normalized['interface']}",
+        f"speed {normalized['speed']}",
+        "connect",
+        f"loadbin {binary_token}, {normalized['address']}",
+        f"verifybin {binary_token}, {normalized['address']}",
+    ]
+    if not no_run:
+        commands.extend(["r", "g"])
+    commands.append("exit")
+    return commands, normalized
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("-Workspace")
@@ -48,11 +77,19 @@ def main(argv: list[str] | None = None) -> int:
     binary = Path(args.BinPath) if args.BinPath else (workspace / "mcu" / "project" / "mdk" / "__build" / "bin" / "application.bin" if workspace else None)
     if binary is None or not binary.is_file():
         return emit(failure(operation, 2, f"BIN not found: {binary}", log=str(log), workspace=args.Workspace, bin=str(binary) if binary else None), args.Json)
-    commands = [f"device {args.Device}", f"si {args.Interface}", f"speed {args.Speed}", "connect", f"loadbin {binary}, {args.Address}", f"verifybin {binary}, {args.Address}"]
-    if not args.NoRun:
-        commands.extend(["r", "g"])
-    commands.append("exit")
-    command_file.write_text("\n".join(commands) + "\n", encoding="ascii")
+    binary = binary.resolve()
+    try:
+        commands, normalized = flash_commands(
+            args.Device,
+            args.Interface,
+            args.Speed,
+            args.Address,
+            binary,
+            args.NoRun,
+        )
+    except ValueError as exc:
+        return emit(failure(operation, 2, str(exc), log=str(log), workspace=args.Workspace), args.Json)
+    command_file.write_text("\n".join(commands) + "\n", encoding="utf-8")
     exit_code, _, _ = run_logged([str(jlink), "-CommanderScript", str(command_file)], log, timeout=max(1, args.TimeoutSeconds), error_log=error_log)
     if exit_code == 124:
         return emit(failure(operation, 124, f"JLink flash timed out after {args.TimeoutSeconds} seconds", log=str(log), error_log=str(error_log), command_file=str(command_file), bin=file_info(binary)), args.Json)
@@ -63,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     ok = exit_code == 0 and bool(loaded) and bool(verified) and not failed
     if not ok and exit_code == 0:
         exit_code = 1
-    return emit(result(ok, operation, exit_code, workspace=args.Workspace, device=args.Device, interface=args.Interface, speed=args.Speed, address=args.Address, started_at=started, ended_at=now_iso(), jlink=str(jlink), log=str(log), error_log=str(error_log), command_file=str(command_file), load_marker=loaded, verify_marker=verified, first_failure=failed or (None if ok else "Missing JLink programming evidence"), bin=file_info(binary)), args.Json)
+    return emit(result(ok, operation, exit_code, workspace=args.Workspace, **normalized, started_at=started, ended_at=now_iso(), jlink=str(jlink), log=str(log), error_log=str(error_log), command_file=str(command_file), load_marker=loaded, verify_marker=verified, first_failure=failed or (None if ok else "Missing JLink programming evidence"), bin=file_info(binary)), args.Json)
 
 
 if __name__ == "__main__":
