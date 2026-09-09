@@ -25,6 +25,7 @@ TRELLIS_REFERENCE_FILES = {
     "README.zh-CN.md",
     "bootstrap/embedded_project.py",
     "bootstrap/project_discovery.py",
+    "docs/README.md",
     "docs/architecture/project-projection-and-context.md",
     "install.sh",
     "runtime/windows/embedded-agent/embedded_runtime_common.py",

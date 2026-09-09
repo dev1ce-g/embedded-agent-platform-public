@@ -8,7 +8,8 @@
 平台不是工作流引擎，也不要求或启动某个指定模型。Codex、Claude、OpenCode 或其他 Agent
 都可以通过 CLI、Skill 或后续协议 Adapter 使用同一套项目上下文和 Runtime Interface。
 
-当前状态：**`0.2.0` 发布候选版**，尚未创建正式 tag。接入前请审阅
+当前状态：**`main` 分支上的 `0.2.0` 发布候选版**。活动架构已经不再依赖 Trellis；当前
+尚未创建正式 tag 或 GitHub Release。接入前请审阅
 [变更日志](CHANGELOG.md)、[从 `0.1` 升级到 `0.2`](docs/migration/0.1-to-0.2.zh-CN.md)和
 [软件验收边界](docs/releases/0.2.0.md)。
 
@@ -25,7 +26,8 @@ runtime/windows/ Windows Runtime 与工具/硬件 Adapter
 docs/            架构、迁移和运维文档
 ```
 
-整体边界见[平台能力模型](docs/architecture/platform-capability-model.md)和
+文档入口见[文档地图](docs/README.md)，整体边界见
+[平台能力模型](docs/architecture/platform-capability-model.md)和
 [项目投影模型](docs/architecture/project-projection-and-context.md)。已执行的重构步骤与后续路线见
 [Trellis 移除与平台重构](docs/refactoring/trellis-removal.zh-CN.md)。
 

@@ -5,7 +5,8 @@ and individual schema versions are independent version axes.
 
 ## [0.2.0] - Unreleased
 
-`0.2.0` is a release candidate until its release commit, CI run, and tag exist.
+`0.2.0` is the release candidate on `main`. Its software acceptance has passed;
+it remains unreleased until a tag and GitHub Release are published.
 It intentionally breaks the active Trellis-based architecture from `0.1.0`
 instead of maintaining two execution models.
 

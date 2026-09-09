@@ -11,7 +11,9 @@ The platform is not a workflow engine and does not require or launch a specific
 model. Existing agents consume the same project context and fixed Runtime
 interfaces through CLI, Skills, or future protocol adapters.
 
-Current status: **`0.2.0` release candidate**. It is not yet a tagged release.
+Current status: **`0.2.0` release candidate on `main`**. The active architecture
+no longer depends on Trellis; `0.2.0` has not yet been tagged or published as a
+GitHub Release.
 Review the [changelog](CHANGELOG.md), the
 [`0.1` to `0.2` upgrade guide](docs/migration/0.1-to-0.2.md), and the
 [software acceptance boundary](docs/releases/0.2.0.md) before adopting it.
@@ -29,7 +31,8 @@ runtime/windows/ Windows Runtime and tool/hardware adapters
 docs/            Architecture, migration, and operations documentation
 ```
 
-See the [platform capability model](docs/architecture/platform-capability-model.md)
+Start from the [documentation map](docs/README.md), the
+[platform capability model](docs/architecture/platform-capability-model.md)
 and [project projection model](docs/architecture/project-projection-and-context.md).
 The executed refactoring plan and remaining roadmap are recorded in
 [Trellis Removal And Platform Refactoring](docs/refactoring/trellis-removal.md).
