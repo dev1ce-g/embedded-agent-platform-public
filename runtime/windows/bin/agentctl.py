@@ -137,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("--keil-target", "-Target"),
                 ("--artifact-name", "-ArtifactName"),
                 ("--output-directory", "-OutputDirectory"),
+                ("--artifact-kind", "-ArtifactKind"),
             ):
                 value = option(arguments, source)
                 if value:

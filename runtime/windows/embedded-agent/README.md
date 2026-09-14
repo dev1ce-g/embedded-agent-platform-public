@@ -130,6 +130,20 @@ Run `embedded-agent.cmd --help` for the complete command surface. Build, flash,
 repository mutation, Jenkins, and device commands retain their documented
 confirmation gates and path boundaries.
 
+### Keil executable and library outputs
+
+`build --target keil` accepts an explicitly selected executable or library
+project, including projects outside an `mcu/` directory. The Runtime forwards
+the project's output name, directory and kind to the build adapter. Library
+outputs use `.lib`; an explicit output suffix is not appended twice.
+
+A UV4 exit code of 1 is accepted when the current log reports zero errors,
+contains no failure marker, and the expected artifact exists. The backend
+returns the raw `tool_exit_code` alongside the normalized `exit_code`.
+An exit code of 0 alone is insufficient. This build result does not prove
+artifact freshness for a flash receipt; MCU flash still rejects library and
+unknown output kinds.
+
 ## Modules
 
 `embedded-agent.py` is the stable launcher. Runtime behavior is split into

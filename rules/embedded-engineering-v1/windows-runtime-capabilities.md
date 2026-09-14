@@ -203,6 +203,17 @@ Rules:
   Runtime when the project or task selects the Windows build environment.
 - Build commands should resolve workspace, toolchain, Keil project, Docker SDK
   and target details from Windows project background.
+- Explicitly selected Keil executable and library projects are valid build
+  targets. The artifact must match the declared output name and type (`.lib`
+  for a library); `keil` remains the generic public build target.
+- A warning-only UV4 exit code of 1 is accepted only with a zero-error log,
+  no failure marker, and the expected artifact. Preserve the raw
+  `tool_exit_code` separately from the normalized Runtime result. Exit code 0
+  still requires a current success log and an artifact; this is not a
+  flash-eligible provenance receipt.
+- Allowing a library build does not make it flashable. MCU flash requires an
+  explicitly selected executable project; library and unknown output kinds
+  are blocked before the flash backend.
 - Build does not need the flash/board gate, but it still needs stable
   environment evidence.
 - A build success claim should include:

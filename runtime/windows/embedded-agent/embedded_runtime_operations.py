@@ -118,6 +118,18 @@ def command_build(args: argparse.Namespace) -> int:
                 agentctl_args.extend(["--artifact-name", target_build["output"]])
             if target_build.get("output_directory"):
                 agentctl_args.extend(["--output-directory", target_build["output_directory"]])
+            output_kind = target_build.get("output_kind")
+            if not output_kind:
+                output_kind = next(
+                    (
+                        item.get("output_kind")
+                        for item in background.get("toolchains", {}).get("keil_projects", [])
+                        if item.get("path") == target_build["project"]
+                    ),
+                    None,
+                )
+            if output_kind:
+                agentctl_args.extend(["--artifact-kind", output_kind])
         backend = run_agentctl(args, agentctl_args)
     value = result(
         bool(backend.get("ok")),
@@ -693,6 +705,22 @@ def command_flash(args: argparse.Namespace) -> int:
             "output_kind": selected_project.get("output_kind"),
             "user_options": selected_project.get("user_options"),
         }
+        if selected_project.get("output_kind") != "executable":
+            value = result(
+                False,
+                "flash",
+                5,
+                project_id=background["project_id"],
+                target=args.target,
+                background_id=background["background_id"],
+                blocked=True,
+                gate="mcu-keil-output-kind",
+                output_kind=selected_project.get("output_kind"),
+                first_failure="MCU flash requires an executable Keil project",
+            )
+            append_run(paths, background["project_id"], value)
+            print_result(value, args.json)
+            return 5
     if not args.require_confirm:
         value = result(False, "flash", 2, project_id=background["project_id"], target=args.target, requires_human_confirm=True, first_failure="Flash requires --require-confirm")
         print_result(value, args.json)

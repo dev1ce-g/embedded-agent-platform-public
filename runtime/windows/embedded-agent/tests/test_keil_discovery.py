@@ -94,7 +94,7 @@ class KeilDiscoveryTests(unittest.TestCase):
         self.assertEqual(application["user_options"]["dpidr"], "0x2BA01477")
         self.assertEqual(application["user_options"]["flash_algorithms"][0]["start"], "0x0")
 
-    def test_invalid_or_library_selection_fails_closed(self) -> None:
+    def test_invalid_selection_fails_closed_and_library_selection_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = parse_keil(self.write_project(root, "mcu/a/firmware.uvprojx", executable=True), root)
@@ -107,7 +107,7 @@ class KeilDiscoveryTests(unittest.TestCase):
                 mcu_keil_project="mcu/missing.uvprojx",
             )
             library = parse_keil(self.write_project(root, "vendor/library.uvprojx", executable=False), root)
-            invalid_kind = infer_targets(
+            library_target = infer_targets(
                 root,
                 "mcu-only",
                 [{"kind": "keil", "path": library["path"]}],
@@ -117,7 +117,10 @@ class KeilDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(invalid["mcu"]["build"]["selection_status"], "invalid_selection")
         self.assertIsNone(invalid["mcu"]["build"]["project"])
-        self.assertEqual(invalid_kind["mcu"]["build"]["selection_status"], "invalid_kind")
+        library_build = library_target["mcu"]["build"]
+        self.assertEqual(library_build["selection_status"], "selected")
+        self.assertEqual(library_build["project"], "vendor/library.uvprojx")
+        self.assertEqual(library_build["output_kind"], "library")
 
     def test_background_write_requires_selection_and_then_reuses_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
