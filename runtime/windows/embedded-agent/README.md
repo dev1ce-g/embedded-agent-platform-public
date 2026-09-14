@@ -52,9 +52,10 @@ expand the boundary. The Runtime revalidates the persisted workspace against
 that boundary on every background load, so replacing it or an ancestor with a
 junction fails closed.
 
-The Runtime otherwise stores mutable state under
-`%LOCALAPPDATA%\EmbeddedAgentPlatform\state` and uses install-relative backend
-paths. A machine deployment may set `EMBEDDED_AGENT_INSTALL_ROOT` before the
+The installed launcher stores mutable state under `<install-root>\state`
+(`%LOCALAPPDATA%\EmbeddedAgentPlatform\state` for the default installation)
+and uses install-relative backend paths. A machine deployment may set
+`EMBEDDED_AGENT_INSTALL_ROOT` before the
 launcher starts; transport payloads and `EMBEDDED_AGENT_ROOT` cannot override
 the stable launcher's state root. Python backend locations are not configurable:
 the Runtime accepts only regular, non-symlink resources from its own installation.
@@ -79,6 +80,9 @@ non-reparse file and its SHA-256 is mandatory. Restrict the registry, tool and
 firmware directory with Windows ACLs. MPU flash callers pass only
 `--connection-id`; `--aboot-root`, `--firmware-root` and their former
 environment equivalents are not accepted.
+
+See the [Aboot runbook](../../../docs/operations/windows-agent-aboot-flash.md)
+for a current command example, erase risks, and evidence limits.
 
 ### CAN drivers
 

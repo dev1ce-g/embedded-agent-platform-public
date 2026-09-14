@@ -20,6 +20,8 @@
 - [仓库首页](../README.zh-CN.md)：安装、初始化、Runtime 配置与安全边界。
 - [Windows Runtime 资产](operations/windows-runtime-assets.md)：安装目录、机器配置和
   第三方工具边界。
+- [Windows Aboot 烧写](operations/windows-agent-aboot-flash.md)：新版连接配置、执行入口、
+  擦除风险与结果解释。
 - [0.2.0 软件验收](releases/0.2.0.md)：实际运行的测试、通过的 CI 与明确未覆盖项。
 
 ## 从 Trellis 迁移
