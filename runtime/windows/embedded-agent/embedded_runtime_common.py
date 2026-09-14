@@ -1454,8 +1454,6 @@ def select_keil_project(
     )
     if selected is None:
         return None, "invalid_selection", candidates
-    if selected.get("output_kind") == "library":
-        return None, "invalid_kind", candidates
     return selected, "selected", candidates
 
 def infer_targets(
@@ -1477,6 +1475,7 @@ def infer_targets(
                 "target": selected.get("target") if selected else None,
                 "output": selected.get("output") if selected else None,
                 "output_directory": selected.get("output_directory") if selected else None,
+                "output_kind": selected.get("output_kind") if selected else None,
                 "selection_status": selection_status,
                 "selection_candidates": candidates,
                 "selection_source": selection_source if selected else None,

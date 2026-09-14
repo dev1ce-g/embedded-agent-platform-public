@@ -69,6 +69,13 @@ fields remain available throughout v1. New consumers should use
 `platform_version` identifies the installed platform release and is independent
 from `contract_version`.
 
+Keil build results may add `backend.tool_exit_code` (integer) and a selected
+build's `output_kind` (`executable`, `library`, or `unknown`). These are optional
+additions, not a contract-version change. `exit_code` remains the normalized
+Runtime outcome: a raw UV4 warning exit of 1 can normalize to success only
+with a zero-error success log, no failure marker, and the expected artifact.
+This command result is not a flash-provenance receipt.
+
 `ok` and `error` describe whether the requested Runtime command was processed.
 For Job status/output commands, `state` describes the referenced execution, so
 an `ok: true` status query can legitimately report `state: failed`.

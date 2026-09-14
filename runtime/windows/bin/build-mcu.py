@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-Target", default="application")
     parser.add_argument("-ArtifactName")
     parser.add_argument("-OutputDirectory")
+    parser.add_argument("-ArtifactKind", choices=("executable", "library", "unknown"), default="executable")
     parser.add_argument("-Json", action="store_true")
     args = parser.parse_args(argv)
     operation = "build-mcu"
@@ -60,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     elif not stdout and not stderr:
         write_log(log, f"UV4 log missing: {uv4_log}")
     if args.ArtifactRoot:
-        artifact = latest_artifact([Path(args.ArtifactRoot)], ("*.axf", "*.bin", "*.hex"))
+        patterns = ("*.lib",) if args.ArtifactKind == "library" else ("*.axf", "*.bin", "*.hex")
+        artifact = latest_artifact([Path(args.ArtifactRoot)], patterns)
     else:
         artifact_name = args.ArtifactName or args.Target
         output_parts = [
@@ -68,12 +70,29 @@ def main(argv: list[str] | None = None) -> int:
             for item in re.split(r"[\\/]+", args.OutputDirectory or "Objects")
             if item not in {"", "."}
         ]
-        artifact = file_info(mdk.joinpath(*output_parts, f"{artifact_name}.axf"))
-    success_marker = first_match(log, (r"0 Error\(s\)", r"Build complete"))
+        default_suffix = ".lib" if args.ArtifactKind == "library" else ".axf"
+        has_artifact_suffix = Path(artifact_name).suffix.lower() in {".axf", ".elf", ".bin", ".hex", ".lib"}
+        artifact_filename = artifact_name if has_artifact_suffix else f"{artifact_name}{default_suffix}"
+        artifact = file_info(mdk.joinpath(*output_parts, artifact_filename))
+    zero_error_marker = first_match(log, (r"\b0 Error\(s\)",))
+    success_marker = zero_error_marker or first_match(log, (r"Build complete",))
     failure_marker = first_match(log, (r"Error:", r"failed", r"Undefined symbol"))
-    ok = exit_code == 0 and bool(success_marker)
-    if not ok and exit_code == 0:
-        exit_code = 1
+    error_summary = first_match(log, (r"\b[1-9][0-9]* Error\(s\)",))
+    failure_marker = failure_marker or error_summary
+    tool_exit_code = exit_code
+    zero_errors = zero_error_marker is not None
+    ok = bool(artifact and success_marker and not failure_marker and (exit_code == 0 or (exit_code == 1 and zero_errors)))
+    exit_code = 0 if ok else exit_code or 1
+    if ok:
+        first_failure = None
+    elif failure_marker:
+        first_failure = failure_marker
+    elif not success_marker:
+        first_failure = "Missing Keil build success marker"
+    elif artifact is None:
+        first_failure = "Expected Keil build artifact not found"
+    else:
+        first_failure = f"UV4 exited with code {tool_exit_code}"
     return emit(
         result(
             ok,
@@ -83,8 +102,9 @@ def main(argv: list[str] | None = None) -> int:
             started_at=started,
             ended_at=now_iso(),
             log=str(log),
+            tool_exit_code=tool_exit_code,
             success_marker=success_marker,
-            first_failure=failure_marker or (None if ok else "Missing Keil build success marker"),
+            first_failure=first_failure,
             artifact=artifact,
         ),
         args.Json,

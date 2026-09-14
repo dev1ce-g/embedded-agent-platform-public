@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -39,15 +39,15 @@ jobs:
         run: python -m unittest discover -s runtime/windows/embedded-agent/tests -v
 
       - name: Run Mac wrapper tests
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: python -m unittest bootstrap.tests.test_mac_embedded_agent_wrapper -v
 
       - name: Run full bootstrap tests
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: python -m unittest discover -s bootstrap/tests -v
 
       - name: Check POSIX installer and adapter syntax
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         shell: bash
         run: bash -n install.sh runtime/mac/bin/embedded-agent runtime/wsl/bin/embedded-agent
 

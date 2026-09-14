@@ -41,7 +41,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_fresh_install_uses_platform_rule_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             template = self.make_template(root)
@@ -58,7 +58,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_repeated_install_is_byte_identical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             template = self.make_template(root)
@@ -76,7 +76,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_dry_run_is_zero_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             (target / "keep.txt").write_bytes(b"keep\r\n")
@@ -91,7 +91,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_user_modified_rule_becomes_candidate_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             template = self.make_template(root)
@@ -108,7 +108,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_existing_different_candidate_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             template = self.make_template(root)
@@ -126,7 +126,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_platform_owned_rule_is_safely_updated_from_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             target.mkdir()
             template = self.make_template(root, b"v1\n")
@@ -142,7 +142,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_legacy_trellis_tree_is_never_touched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             legacy = target / ".trellis"
             (legacy / "spec").mkdir(parents=True)
@@ -157,7 +157,7 @@ class RuleBundleInstallerTests(unittest.TestCase):
 
     def test_nested_symlink_cannot_escape_rule_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "project"
             outside = root / "outside"
             target.mkdir()
